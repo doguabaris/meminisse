@@ -1,0 +1,32 @@
+{
+  "name": "meminisse",
+  "version": "0.1.0",
+  "description": "Always-on persistent global and workspace memory for Codex sessions.",
+  "author": {
+    "name": "Doğu Abaris",
+    "email": "abaris@null.net",
+    "url": "https://doguabaris.bio"
+  },
+  "homepage": "https://doguabaris.bio",
+  "repository": "https://github.com/doguabaris/meminisse",
+  "license": "MIT",
+  "keywords": ["codex", "memory", "recall", "context"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Meminisse",
+    "shortDescription": "Always-on memory across Codex sessions.",
+    "longDescription": "Recalls relevant user preferences, prior work, decisions, reusable procedures, workspace context, and session events at the start of Codex tasks, then stores durable outcomes for future sessions.",
+    "developerName": "Doğu Abaris",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://doguabaris.bio",
+    "privacyPolicyURL": "",
+    "termsOfServiceURL": "",
+    "defaultPrompt": [
+      "Recall relevant memory for this task.",
+      "Remember this for future sessions.",
+      "Summarize recent memory."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

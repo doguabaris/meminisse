@@ -1,0 +1,20 @@
+{
+  "name": "meminisse-local",
+  "interface": {
+    "displayName": "Meminisse Local"
+  },
+  "plugins": [
+    {
+      "name": "meminisse",
+      "source": {
+        "source": "local",
+        "path": "./plugins/meminisse"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

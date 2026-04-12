@@ -1,0 +1,31 @@
+component: concise subject
+
+Why:
+
+- …
+
+What:
+
+- …
+
+Bug: #1234
+#
+# - Subject should be 50 characters or less
+# - Separate body from subject
+# - Use imperative mood, avoid passive voice
+# - Wrap the body text at 72 chars
+# 
+# Explain "why" and "what". If it does not make sense to include
+# this in your commit message, then delete those sections.
+#
+# Include the Bug: line only when the change tracks an issue.
+#
+# If you are unsure about what to use for component:
+#  - "cli" for plugins/meminisse/scripts/meminisse.js changes
+#  - "install" for personal plugin installer and marketplace changes
+#  - "skill" for Codex skill instruction changes
+#  - "docs" for README, contributing, publishing, and policy changes
+#  - "config" for linting, formatting, package, and Docker changes
+#
+# Hint: you can enable this to be used as a template for git commit
+# git config commit.template .gitmessage

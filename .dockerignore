@@ -1,0 +1,20 @@
+# Git metadata
+.git
+
+# Node installs & logs
+node_modules
+npm-debug.log*
+yarn-error.log*
+yarn-debug.log*
+
+# Build outputs
+coverage
+dist
+.meminisse
+.temp
+temp
+
+# Editor cruft
+.DS_Store
+.idea
+.vscode

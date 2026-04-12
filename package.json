@@ -1,0 +1,55 @@
+{
+  "name": "meminisse",
+  "version": "0.1.0",
+  "description": "Always-on persistent memory plugin for Codex.",
+  "main": "plugins/meminisse/scripts/meminisse.js",
+  "scripts": {
+    "meminisse": "node plugins/meminisse/scripts/meminisse.js",
+    "install:home": "node plugins/meminisse/scripts/install-home.js",
+    "test": "node --test",
+    "test:status": "node plugins/meminisse/scripts/meminisse.js status",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "lint:md": "remark . --quiet --frail",
+    "format:md": "remark . --output --quiet",
+    "format": "prettier --write \"**/*.{js,mjs,json,md}\""
+  },
+  "keywords": [
+    "codex",
+    "memory",
+    "plugin"
+  ],
+  "author": {
+    "name": "Doğu Abaris",
+    "email": "abaris@null.net",
+    "url": "https://doguabaris.bio"
+  },
+  "license": "MIT",
+  "homepage": "https://doguabaris.bio",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/doguabaris/meminisse.git"
+  },
+  "bugs": {
+    "url": "https://github.com/doguabaris/meminisse/issues"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  },
+  "bin": {
+    "meminisse": "plugins/meminisse/scripts/meminisse.js",
+    "meminisse-install-home": "plugins/meminisse/scripts/install-home.js"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.5.0",
+    "prettier": "^3.6.2",
+    "remark-cli": "^12.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-preset-lint-consistent": "^6.0.1",
+    "remark-preset-lint-recommended": "^7.0.1",
+    "remark-stringify": "^11.0.0"
+  },
+  "type": "commonjs"
+}

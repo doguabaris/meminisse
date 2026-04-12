@@ -1,0 +1,379 @@
+/**
+ * @file meminisse-cli.test.js
+ * @description Integration tests for the Meminisse CLI and personal installer.
+ *
+ * These tests run the real scripts in isolated temporary workspaces and HOME
+ * directories. They verify the behavior users depend on instead of only checking
+ * that commands start successfully.
+ *
+ * @author      Doğu Abaris <abaris@null.net>
+ * @license     MIT
+ */
+'use strict';
+
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const test = require('node:test');
+
+const repoRoot = process.cwd();
+const packageVersion = JSON.parse(
+  fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
+).version;
+const cliPath = path.join(repoRoot, 'plugins', 'meminisse', 'scripts', 'meminisse.js');
+const installerPath = path.join(repoRoot, 'plugins', 'meminisse', 'scripts', 'install-home.js');
+
+/**
+ * Creates an isolated temporary directory for a test.
+ *
+ * @param {string} label - Human-readable directory label.
+ * @returns {string} Temporary directory path.
+ */
+function makeTempDir(label) {
+  return fs.mkdtempSync(path.join(os.tmpdir(), `meminisse-${label}-`));
+}
+
+/**
+ * Runs a Node script and fails with useful output when it exits non-zero.
+ *
+ * @param {string} scriptPath - Script to execute with Node.
+ * @param {string[]} args - Script arguments.
+ * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
+ */
+function runNode(scriptPath, args, options = {}) {
+  const result = runNodeRaw(scriptPath, args, options);
+
+  assert.equal(
+    result.status,
+    0,
+    [
+      `Command failed: node ${scriptPath} ${args.join(' ')}`,
+      `stdout:\n${result.stdout}`,
+      `stderr:\n${result.stderr}`,
+    ].join('\n'),
+  );
+
+  return result;
+}
+
+/**
+ * Runs a Node script without asserting on the exit status.
+ *
+ * @param {string} scriptPath - Script to execute with Node.
+ * @param {string[]} args - Script arguments.
+ * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
+ */
+function runNodeRaw(scriptPath, args, options = {}) {
+  return spawnSync(process.execPath, [scriptPath, ...args], {
+    cwd: options.cwd || repoRoot,
+    env: {
+      ...process.env,
+      HOME: options.home || process.env.HOME,
+    },
+    encoding: 'utf8',
+  });
+}
+
+/**
+ * Runs the Meminisse CLI.
+ *
+ * @param {string[]} args - CLI arguments.
+ * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
+ */
+function runCli(args, options = {}) {
+  return runNode(cliPath, args, options);
+}
+
+/**
+ * Runs the Meminisse CLI without asserting on the exit status.
+ *
+ * @param {string[]} args - CLI arguments.
+ * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
+ */
+function runCliRaw(args, options = {}) {
+  return runNodeRaw(cliPath, args, options);
+}
+
+test('CLI initializes, stores, recalls, consolidates, and reports memory', () => {
+  const workspace = makeTempDir('workspace-');
+  const home = makeTempDir('home-');
+
+  try {
+    fs.writeFileSync(path.join(workspace, '.dockerignore'), 'node_modules\n', 'utf8');
+    fs.writeFileSync(path.join(workspace, '.npmignore'), 'node_modules\n', 'utf8');
+    fs.writeFileSync(path.join(workspace, '.remarkignore'), 'node_modules/\n', 'utf8');
+
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    runCli(['init', '--scope', 'project'], { cwd: workspace, home });
+
+    runCli(
+      [
+        'remember',
+        '--kind',
+        'decision',
+        '--tags',
+        'smoke,recall',
+        'Use Meminisse test storage for functional verification.',
+      ],
+      { cwd: workspace, home },
+    );
+    runCli(
+      [
+        'remember',
+        '--kind',
+        'procedure',
+        '--tags',
+        'smoke,workflow',
+        'Run init, remember, recall, compact, and status to verify behavior.',
+      ],
+      { cwd: workspace, home },
+    );
+    runCli(
+      [
+        'remember',
+        '--kind',
+        'preference',
+        '--scope',
+        'global',
+        '--tags',
+        'smoke,global',
+        'Prefer isolated smoke tests for product verification.',
+      ],
+      { cwd: workspace, home },
+    );
+
+    const recall = runCli(
+      ['recall', '--json', '--limit', '5', 'smoke functional verification recall workflow'],
+      { cwd: workspace, home },
+    );
+    const records = JSON.parse(recall.stdout);
+    const kinds = records.map((record) => record.kind);
+
+    assert.ok(records.length >= 3);
+    assert.ok(kinds.includes('decision'));
+    assert.ok(kinds.includes('procedure'));
+    assert.ok(kinds.includes('preference'));
+
+    runCli(['compact', '--scope', 'all'], { cwd: workspace, home });
+    const status = runCli(['status'], { cwd: workspace, home });
+
+    assert.match(status.stdout, /project: 2\/2 active memories/);
+    assert.match(status.stdout, /global: 1\/1 active memories/);
+    assert.ok(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'decisions.jsonl')));
+    assert.ok(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'procedures.jsonl')));
+    assert.ok(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'consolidated.md')));
+    assert.equal(countIgnoreEntry(path.join(workspace, '.gitignore'), '.meminisse'), 1);
+    assert.equal(countIgnoreEntry(path.join(workspace, '.dockerignore'), '.meminisse'), 1);
+    assert.equal(countIgnoreEntry(path.join(workspace, '.npmignore'), '.meminisse'), 1);
+    assert.equal(countIgnoreEntry(path.join(workspace, '.remarkignore'), '.meminisse'), 1);
+    assert.ok(
+      fs.existsSync(
+        path.join(home, '.codex', 'memories', 'meminisse', 'memory', 'preferences.jsonl'),
+      ),
+    );
+    assert.ok(
+      fs.existsSync(
+        path.join(home, '.codex', 'memories', 'meminisse', 'memory', 'consolidated.md'),
+      ),
+    );
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Counts normalized ignore entries in a file.
+ *
+ * @param {string} filePath - Ignore file path.
+ * @param {string} entry - Entry to count.
+ * @returns {number} Number of matching entries.
+ */
+function countIgnoreEntry(filePath, entry) {
+  return fs
+    .readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/\/$/, ''))
+    .filter((line) => line === entry).length;
+}
+
+test('home installer writes plugin, skill, and marketplace into an isolated HOME', () => {
+  const home = makeTempDir('install-home-');
+
+  try {
+    runNode(installerPath, ['--force'], { home });
+
+    const pluginTarget = path.join(home, '.codex', 'plugins', 'meminisse');
+    const skillTarget = path.join(home, '.codex', 'skills', 'meminisse');
+    const marketplacePath = path.join(home, '.agents', 'plugins', 'marketplace.json');
+
+    fs.mkdirSync(pluginTarget, { recursive: true });
+    fs.writeFileSync(path.join(pluginTarget, 'STALE.md'), 'stale file\n', 'utf8');
+    runNode(installerPath, ['--force'], { home: home });
+
+    assert.ok(fs.existsSync(path.join(pluginTarget, '.codex-plugin', 'plugin.json')));
+    assert.ok(fs.existsSync(path.join(pluginTarget, 'scripts', 'meminisse.js')));
+    assert.ok(fs.existsSync(path.join(skillTarget, 'SKILL.md')));
+    assert.equal(fs.existsSync(path.join(pluginTarget, 'STALE.md')), false);
+
+    const marketplace = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
+    const entry = marketplace.plugins.find((plugin) => plugin.name === 'meminisse');
+
+    assert.equal(marketplace.name, 'local');
+    assert.equal(marketplace.interface.displayName, 'Local Plugins');
+    assert.equal(entry.source.source, 'local');
+    assert.equal(entry.source.path, './.codex/plugins/meminisse');
+    assert.equal(entry.policy.installation, 'INSTALLED_BY_DEFAULT');
+    assert.equal(entry.policy.authentication, 'ON_USE');
+
+    const installedCli = path.join(pluginTarget, 'scripts', 'meminisse.js');
+    const installedInstaller = path.join(pluginTarget, 'scripts', 'install-home.js');
+    const version = runNode(installedCli, ['--version'], { home });
+    assert.equal(version.stdout.trim(), packageVersion);
+
+    runNode(installedInstaller, ['--force'], { home });
+    assert.ok(fs.existsSync(path.join(pluginTarget, '.codex-plugin', 'plugin.json')));
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('remember blocks likely secrets before writing durable memory', () => {
+  const workspace = makeTempDir('secret-workspace-');
+  const home = makeTempDir('secret-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+
+    const result = runCliRaw(
+      ['remember', '--kind', 'fact', 'api_key=sk-test12345678901234567890'],
+      { cwd: workspace, home },
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Possible .* detected/);
+    assert.equal(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'facts.jsonl')), false);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('remember skips duplicate active memories unless forced', () => {
+  const workspace = makeTempDir('duplicate-workspace-');
+  const home = makeTempDir('duplicate-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const text = 'Use duplicate guard to avoid repeated long-term memory records.';
+
+    runCli(['remember', '--kind', 'decision', text], { cwd: workspace, home });
+    const duplicate = runCli(['remember', '--kind', 'decision', text], { cwd: workspace, home });
+    const status = runCli(['status', '--scope', 'project'], { cwd: workspace, home });
+
+    assert.match(duplicate.stdout, /Duplicate memory exists/);
+    assert.match(status.stdout, /project: 1\/1 active memories/);
+
+    runCli(['remember', '--kind', 'decision', '--force', text], { cwd: workspace, home });
+    const forcedStatus = runCli(['status', '--scope', 'project'], { cwd: workspace, home });
+    assert.match(forcedStatus.stdout, /project: 2\/2 active memories/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('remember supersedes older records and recall ignores superseded memories', () => {
+  const workspace = makeTempDir('supersedes-workspace-');
+  const home = makeTempDir('supersedes-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const original = runCli(['remember', '--kind', 'decision', 'Use Mocha for Meminisse tests.'], {
+      cwd: workspace,
+      home,
+    });
+    const originalId = original.stdout.match(/Remembered (mem_[a-f0-9_]+)/)[1];
+
+    const replacement = runCli(
+      [
+        'remember',
+        '--kind',
+        'decision',
+        '--supersedes',
+        originalId,
+        'Use the Node built-in test runner for Meminisse integration tests.',
+      ],
+      { cwd: workspace, home },
+    );
+    const replacementId = replacement.stdout.match(/Remembered (mem_[a-f0-9_]+)/)[1];
+    const status = runCli(['status', '--scope', 'project'], { cwd: workspace, home });
+    const recall = runCli(['recall', '--json', 'Mocha Node test runner'], { cwd: workspace, home });
+    const records = JSON.parse(recall.stdout);
+    const decisions = fs
+      .readFileSync(path.join(workspace, '.meminisse', 'memory', 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    const oldRecord = decisions.find((record) => record.id === originalId);
+
+    assert.match(status.stdout, /project: 1\/2 active memories/);
+    assert.equal(oldRecord.status, 'superseded');
+    assert.equal(oldRecord.superseded_by, replacementId);
+    assert.equal(
+      records.some((record) => record.id === originalId),
+      false,
+    );
+    assert.equal(
+      records.some((record) => record.id === replacementId),
+      true,
+    );
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('recall supports token-efficient modes, thresholds, and max character budgets', () => {
+  const workspace = makeTempDir('recall-budget-workspace-');
+  const home = makeTempDir('recall-budget-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const body = `BudgetMarker ${'long contextual detail '.repeat(80)}`;
+
+    runCli(['remember', '--kind', 'fact', '--summary', 'BudgetMarker compact summary.', body], {
+      cwd: workspace,
+      home,
+    });
+
+    const summary = runCli(['recall', '--mode', 'summary', 'BudgetMarker'], {
+      cwd: workspace,
+      home,
+    });
+    const full = runCli(['recall', '--mode', 'full', '--max-chars', '220', 'BudgetMarker'], {
+      cwd: workspace,
+      home,
+    });
+    const ids = runCli(['recall', '--mode', 'ids', 'BudgetMarker'], { cwd: workspace, home });
+    const threshold = runCli(['recall', '--threshold', '999', 'BudgetMarker'], {
+      cwd: workspace,
+      home,
+    });
+
+    assert.match(summary.stdout, /BudgetMarker compact summary/);
+    assert.doesNotMatch(summary.stdout, /long contextual detail long contextual detail/);
+    assert.match(full.stdout, /truncated/);
+    assert.match(ids.stdout, /mem_[0-9]{8}_[a-f0-9]{10} score=/);
+    assert.match(threshold.stdout, /No relevant memories found/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
