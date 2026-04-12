@@ -23,8 +23,8 @@ each record while still searching all relevant memory together.
 Meminisse uses project-local and user-global storage to do persistent
 recall. It takes memory text from CLI commands and Codex skill workflows
 and uses it to write structured records with summaries, tags, entities,
-paths, timestamps, confidence, and status fields. For more details about
-the technical implementation, see [the developer
+paths, timestamps, confidence, schema version, and status fields. For
+more details about the technical implementation, see [the developer
 documentation](#developer-documentation).
 
 ### What Meminisse does not do
@@ -33,11 +33,12 @@ This tool cannot increase the model context window. It does not make
 Codex automatically know every stored memory unless the memory is
 recalled and brought back into the active conversation.
 
-Meminisse does not provide semantic vector search, hosted sync,
-multi-user conflict resolution, or encryption. It blocks common secret
-patterns before writing memory records, but you should still avoid
-storing API keys, passwords, private keys, `.env` values, or other
-credentials.
+Meminisse does not provide semantic vector search, hosted sync, or
+multi-user conflict resolution. It supports optional at-rest encryption
+for JSONL memory records with a key supplied from an environment
+variable. It also blocks common secret patterns before writing memory
+records, but you should still avoid storing API keys, passwords, private
+keys, `.env` values, or other credentials.
 
 ## Prerequisites
 
@@ -50,8 +51,8 @@ Before using this tool, you should be familiar with:
 You should have:
 
 - Node.js available on your `PATH`.
-- A Unix-like local development environment. This project is currently
-  developed on macOS.
+- A local shell that can run Node.js and npm commands on macOS, Linux,
+  Windows, or another Node-supported platform.
 - Permission to write to the current repository.
 - Permission to write to `~/.codex/plugins`,
   `~/.codex/skills`, `~/.codex/memories`, and
@@ -139,12 +140,13 @@ already exist, Meminisse adds the project memory directory there too.
 4. Store global preferences with global scope.
 
    ```bash
-   meminisse remember --kind preference --scope global "Prefer concise Turkish status updates."
+   meminisse remember --kind preference --scope global "Prefer concise status updates."
    ```
 
 Meminisse skips exact duplicate active memories unless you pass
 `--force`. It also blocks likely secrets such as API keys, tokens,
-password assignments, private key blocks, and common access-key formats.
+password assignments, private key blocks, credential URLs, `.env` file
+attachments, and common access-key formats.
 
 ### Recall relevant memory
 
@@ -157,7 +159,7 @@ password assignments, private key blocks, and common access-key formats.
 2. Use global installation from any workspace after personal install.
 
    ```bash
-   node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" recall "recent work and preferences"
+   meminisse recall "recent work and preferences"
    ```
 
 3. Use JSON output when integrating with another script.
@@ -174,8 +176,53 @@ password assignments, private key blocks, and common access-key formats.
 
 Recall modes are `summary`, `full`, and `ids`. Terminal recall defaults
 to `summary`, limits output with `--max-chars 4000`, and only returns
-active memories. Matching records also receive lightweight recall
-telemetry with `recall_count` and `last_recalled_at`.
+active memories. Recall uses weighted lexical scoring with BM25-style
+term-frequency normalization across summaries, bodies, tags, entities,
+and paths. Matching records also receive lightweight recall telemetry
+with `recall_count` and `last_recalled_at`.
+
+### Inject startup memory
+
+1. Print high-priority memories for a session startup hook.
+
+   ```bash
+   meminisse inject --scope all
+   ```
+
+2. Limit the injected kinds when a hook should stay narrow.
+
+   ```bash
+   meminisse inject --scope all --kinds preference,procedure --max-chars 2000
+   ```
+
+`inject` is deterministic hook output for preferences, procedures, and
+decisions. It is intended for agent/session startup integration where a
+runtime can execute a command before the first model turn.
+
+### Encrypt memory records
+
+1. Set an encryption key in the environment used by Meminisse.
+
+   ```bash
+   export MEMINISSE_ENCRYPTION_KEY="replace-with-a-long-local-secret"
+   ```
+
+2. Enable encryption for project and global memory.
+
+   ```bash
+   meminisse encryption enable --scope all
+   ```
+
+3. Check encryption status.
+
+   ```bash
+   meminisse encryption status --scope all
+   ```
+
+Encrypted memory records are stored as AES-256-GCM envelopes in the
+primary JSONL files. The key is not written to disk; the same environment
+variable must be available for later recall, list, status, compact, and
+review operations.
 
 ### Inspect and retire memory
 
@@ -280,7 +327,8 @@ Meminisse writes a memory record that points at those project-local
 paths, so future recall can find the supporting file. By default,
 attachments are copied and the original source file is left alone. Pass
 `--move` only when you explicitly want to remove the original source file
-after copying it into `.meminisse`.
+after copying it into `.meminisse`. Meminisse refuses likely secret
+attachments, including `.env` files, unless you pass `--allow-secret`.
 
 ### Consolidate memory
 
@@ -291,7 +339,18 @@ after copying it into `.meminisse`.
    meminisse compact --scope all
    ```
 
-2. Review the generated summaries.
+2. Archive inactive JSONL rows while consolidating when long-lived memory
+   files need cleanup.
+
+   ```bash
+   meminisse compact --scope all --prune
+   ```
+
+   Pruning moves `deleted` and `superseded` records into
+   `.meminisse/memory/archive/<timestamp>/` or the matching global
+   archive directory. Active records stay in the primary JSONL files.
+
+3. Review the generated summaries.
    1. Project summary:
 
       ```text
@@ -304,13 +363,13 @@ after copying it into `.meminisse`.
       ~/.codex/memories/meminisse/memory/consolidated.md
       ```
 
-3. Use the status command to confirm active record counts.
+4. Use the status command to confirm active record counts.
 
    ```bash
    meminisse status
    ```
 
-4. Use verbose status when you need lifecycle and kind breakdowns.
+5. Use verbose status when you need lifecycle and kind breakdowns.
 
    ```bash
    meminisse status --verbose
@@ -367,9 +426,8 @@ The marketplace path points to an old plugin location
 
 - Report issues by opening an issue in the repository where Meminisse is
   published.
-- Ask questions or get help by contacting Doğu Abaris at
-  `abaris@null.net`. Response time is not guaranteed for personal or
-  experimental use.
+- Ask questions in the same repository so context and answers stay
+  attached to the project.
 
 ## Developer documentation
 
@@ -380,14 +438,19 @@ CLI. It depends on `fs`, `path`, `os`, and `crypto` because it writes
 JSONL records, resolves local and global storage paths, and creates
 stable short IDs for memory records.
 
-Meminisse stores records in append-only JSONL files. Recall tokenizes the
-query and scores active records using summary text, body text, tags,
-entities, paths, confidence, status, kind, and recency. Recall supports
-summary, full, and id-only output modes plus relevance thresholds and
-character budgets for token efficiency. Recall also updates lightweight
-per-record telemetry fields so later status and review work can see which
-records are used. Consolidation reads active records and writes a
-Markdown summary plus an `index.json` file.
+Meminisse stores records in append-only JSONL files. New records include
+`schema_version` so future readers can handle format changes without
+guessing. Recall tokenizes the query and scores active records using
+weighted BM25-style lexical scoring across summary text, body text, tags,
+entities, and paths, then applies small confidence, status, kind, and
+recency boosts. Recall supports summary, full, and id-only output modes
+plus relevance thresholds and character budgets for token efficiency.
+Recall also updates lightweight per-record telemetry fields so later
+status and review work can see which records are used. Encryption
+support uses AES-256-GCM with a key supplied by environment variable.
+Consolidation reads active records and writes a Markdown summary plus an
+`index.json` file. `compact --prune` can archive deleted and superseded
+records out of primary JSONL files.
 
 Memory lifecycle controls include duplicate detection, secret detection,
 listing, health checks, review reports, soft deletion, and `--supersedes`
@@ -408,13 +471,17 @@ optional Codex model answer/citation accuracy.
 
 ### Code structure
 
-The `plugins/meminisse/scripts/meminisse.js` module implements the CLI
-commands, memory record format, JSONL storage, recall scoring, and
-consolidation.
+The `bin/meminisse.js` file is a small npm executable launcher.
 
-The `plugins/meminisse/skills/meminisse` directory contains the Codex
-skill instructions that tell Codex when to recall memory and when to
-write durable memory.
+The `src` directory contains the CLI implementation:
+`src/cli.js` dispatches commands, `src/commands/` contains individual
+command handlers, `src/memory/` contains storage and recall logic,
+`src/security/` contains encryption and secret detection, `src/system/`
+contains path and platform helpers, and `src/core/` contains shared CLI
+utilities.
+
+The `skills/meminisse` directory contains the Codex skill instructions
+that tell Codex when to recall memory and when to write durable memory.
 
 The `.agents/plugins/marketplace.json` file exposes Meminisse through a
 repo-scoped marketplace for local testing.
@@ -489,7 +556,7 @@ How to build and run locally:
    2. Or run the installed personal copy:
 
       ```bash
-      node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" status
+      meminisse status
       ```
 
 How to run tests:
@@ -519,8 +586,8 @@ How to run tests:
 
 - `Missing required path`
   - The local installer cannot find the plugin source directory. Run
-    the installer from this repository after confirming
-    `plugins/meminisse` exists.
+    the installer from this repository after confirming `.codex-plugin`,
+    `bin`, `src`, and `skills` exist.
 
 ## How to contribute
 
@@ -534,9 +601,9 @@ The Meminisse maintainers welcome focused contributions.
 
 ### Contribution process
 
-Before contributing, read the existing coding style in
-`plugins/meminisse/scripts`. We follow Corev-style file headers and JSDoc
-comments for script files.
+Before contributing, read the existing coding style in `src/commands`
+and the supporting category folders under `src`. Use clear file headers
+and JSDoc comments for script files.
 
 1. Create a focused branch.
    1. Keep changes scoped to one behavior or documentation area.
@@ -558,10 +625,6 @@ comments for script files.
       ```
 
    2. Restart Codex and confirm the marketplace entry still appears.
-
-## Credits
-
-Meminisse was created by Doğu Abaris.
 
 ## License
 

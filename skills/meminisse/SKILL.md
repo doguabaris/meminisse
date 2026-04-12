@@ -22,42 +22,48 @@ Meminisse maps human memory concepts into Codex workflow:
 
 ## Required Workflow
 
+At session or task start, inject high-priority startup memory first:
+
+```bash
+meminisse inject --scope all --max-chars 4000
+```
+
 Before substantial work, recall relevant context with concise output:
 
 ```bash
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" recall --mode summary --max-chars 4000 "<user task>"
+meminisse recall --mode summary --max-chars 4000 "<user task>"
 ```
 
 If the summary output is not enough, run a narrower full recall:
 
 ```bash
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" recall --mode full --limit 3 "<specific cue>"
+meminisse recall --mode full --limit 3 "<specific cue>"
 ```
 
 If the repo does not have local memory yet, initialize it:
 
 ```bash
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" init --scope all
+meminisse init --scope all
 ```
 
 After meaningful work, write only durable information:
 
 ```bash
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" remember --kind decision "<decision and reason>"
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" remember --kind procedure "<repeatable command or workflow>"
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" remember --kind event "<short summary of what changed>"
+meminisse remember --kind decision "<decision and reason>"
+meminisse remember --kind procedure "<repeatable command or workflow>"
+meminisse remember --kind event "<short summary of what changed>"
 ```
 
 Use global memory for stable user preferences:
 
 ```bash
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" remember --kind preference --scope global "<preference>"
+meminisse remember --kind preference --scope global "<preference>"
 ```
 
 Consolidate periodically:
 
 ```bash
-node "$HOME/.codex/plugins/meminisse/scripts/meminisse.js" compact --scope all
+meminisse compact --scope all
 ```
 
 ## What To Remember

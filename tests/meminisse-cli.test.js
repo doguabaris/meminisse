@@ -22,7 +22,7 @@ const repoRoot = process.cwd();
 const packageVersion = JSON.parse(
   fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
 ).version;
-const cliPath = path.join(repoRoot, 'plugins', 'meminisse', 'scripts', 'meminisse.js');
+const cliPath = path.join(repoRoot, 'bin', 'meminisse.js');
 
 /**
  * Creates an isolated temporary directory for a test.
@@ -39,7 +39,7 @@ function makeTempDir(label) {
  *
  * @param {string} scriptPath - Script to execute with Node.
  * @param {string[]} args - Script arguments.
- * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @param {{ cwd?: string, home?: string, env?: Record<string, string> }} options - Execution options.
  * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
  */
 function runNode(scriptPath, args, options = {}) {
@@ -63,7 +63,7 @@ function runNode(scriptPath, args, options = {}) {
  *
  * @param {string} scriptPath - Script to execute with Node.
  * @param {string[]} args - Script arguments.
- * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @param {{ cwd?: string, home?: string, env?: Record<string, string> }} options - Execution options.
  * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
  */
 function runNodeRaw(scriptPath, args, options = {}) {
@@ -72,6 +72,7 @@ function runNodeRaw(scriptPath, args, options = {}) {
     env: {
       ...process.env,
       HOME: options.home || process.env.HOME,
+      ...(options.env || {}),
     },
     encoding: 'utf8',
   });
@@ -81,7 +82,7 @@ function runNodeRaw(scriptPath, args, options = {}) {
  * Runs the Meminisse CLI.
  *
  * @param {string[]} args - CLI arguments.
- * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @param {{ cwd?: string, home?: string, env?: Record<string, string> }} options - Execution options.
  * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
  */
 function runCli(args, options = {}) {
@@ -92,7 +93,7 @@ function runCli(args, options = {}) {
  * Runs the Meminisse CLI without asserting on the exit status.
  *
  * @param {string[]} args - CLI arguments.
- * @param {{ cwd?: string, home?: string }} options - Execution options.
+ * @param {{ cwd?: string, home?: string, env?: Record<string, string> }} options - Execution options.
  * @returns {import('node:child_process').SpawnSyncReturns<string>} Completed process result.
  */
 function runCliRaw(args, options = {}) {
@@ -161,9 +162,19 @@ test('CLI initializes, stores, recalls, consolidates, and reports memory', () =>
 
     runCli(['compact', '--scope', 'all'], { cwd: workspace, home });
     const status = runCli(['status'], { cwd: workspace, home });
+    const decisionRecords = fs
+      .readFileSync(path.join(workspace, '.meminisse', 'memory', 'decisions.jsonl'), 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    const index = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.meminisse', 'memory', 'index.json'), 'utf8'),
+    );
 
     assert.match(status.stdout, /project: 2\/2 active memories/);
     assert.match(status.stdout, /global: 1\/1 active memories/);
+    assert.equal(decisionRecords[0].schema_version, 1);
+    assert.equal(index.schema_version, 1);
     assert.ok(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'decisions.jsonl')));
     assert.ok(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'procedures.jsonl')));
     assert.ok(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'consolidated.md')));
@@ -218,9 +229,13 @@ test('CLI install --local writes plugin, skill, and marketplace into an isolated
     runCli(['install', '--local', '--force'], { cwd: workspace, home });
 
     assert.ok(fs.existsSync(path.join(pluginTarget, '.codex-plugin', 'plugin.json')));
-    assert.ok(fs.existsSync(path.join(pluginTarget, 'scripts', 'meminisse.js')));
+    assert.ok(fs.existsSync(path.join(pluginTarget, 'bin', 'meminisse.js')));
+    assert.ok(fs.existsSync(path.join(pluginTarget, 'src', 'cli.js')));
+    assert.ok(fs.existsSync(path.join(pluginTarget, 'skills', 'meminisse', 'SKILL.md')));
     assert.ok(fs.existsSync(path.join(skillTarget, 'SKILL.md')));
     assert.equal(fs.existsSync(path.join(pluginTarget, 'STALE.md')), false);
+    assert.equal(fs.existsSync(path.join(pluginTarget, 'tests')), false);
+    assert.equal(fs.existsSync(path.join(pluginTarget, 'benchmarks')), false);
 
     const marketplace = JSON.parse(fs.readFileSync(marketplacePath, 'utf8'));
     const entry = marketplace.plugins.find((plugin) => plugin.name === 'meminisse');
@@ -232,7 +247,7 @@ test('CLI install --local writes plugin, skill, and marketplace into an isolated
     assert.equal(entry.policy.installation, 'INSTALLED_BY_DEFAULT');
     assert.equal(entry.policy.authentication, 'ON_USE');
 
-    const installedCli = path.join(pluginTarget, 'scripts', 'meminisse.js');
+    const installedCli = path.join(pluginTarget, 'bin', 'meminisse.js');
     const version = runNode(installedCli, ['--version'], { home });
     assert.equal(version.stdout.trim(), packageVersion);
     assert.equal(fs.existsSync(path.join(pluginTarget, 'scripts', 'install-home.js')), false);
@@ -273,17 +288,31 @@ test('CLI install --local installs home plugin and doctor reports healthy paths'
 test('remember blocks likely secrets before writing durable memory', () => {
   const workspace = makeTempDir('secret-workspace-');
   const home = makeTempDir('secret-home-');
+  const envFile = path.join(workspace, '.env.test');
 
   try {
     runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    fs.writeFileSync(envFile, 'DATABASE_URL=postgres://user:pass@example.test/db\n', 'utf8');
 
     const result = runCliRaw(
       ['remember', '--kind', 'fact', 'api_key=sk-test12345678901234567890'],
       { cwd: workspace, home },
     );
+    const attachment = runCliRaw(['attach', envFile, '--kind', 'evidence'], {
+      cwd: workspace,
+      home,
+    });
+    const entropy = runCliRaw(
+      ['remember', '--kind', 'fact', 'opaque=AbCdEfGhIjKlMnOpQrStUvWxYz123456+/=='],
+      { cwd: workspace, home },
+    );
 
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /Possible .* detected/);
+    assert.notEqual(attachment.status, 0);
+    assert.match(attachment.stderr, /Possible dotenv file detected/);
+    assert.notEqual(entropy.status, 0);
+    assert.match(entropy.stderr, /Possible high-entropy token detected/);
     assert.equal(fs.existsSync(path.join(workspace, '.meminisse', 'memory', 'facts.jsonl')), false);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
@@ -418,6 +447,169 @@ test('list inspects memories and forget soft-deletes active records', () => {
     assert.match(defaultList.stdout, /No memories found/);
     assert.equal(deletedRecord.status, 'deleted');
     assert.equal(deletedRecord.deleted_reason, 'Retired during lifecycle test.');
+
+    const compacted = runCli(['compact', '--scope', 'project', '--prune'], {
+      cwd: workspace,
+      home,
+    });
+    const prunedStatus = runCli(['status', '--scope', 'project'], { cwd: workspace, home });
+    const archiveRoot = path.join(workspace, '.meminisse', 'memory', 'archive');
+    const archiveDir = path.join(archiveRoot, fs.readdirSync(archiveRoot)[0]);
+    const archivedFacts = fs
+      .readFileSync(path.join(archiveDir, 'facts.jsonl'), 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+
+    assert.match(compacted.stdout, /Pruned 1 inactive project records/);
+    assert.match(prunedStatus.stdout, /project: 0\/0 active memories/);
+    assert.equal(archivedFacts[0].id, id);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('recall ranks stronger lexical matches with BM25-style scoring', () => {
+  const workspace = makeTempDir('bm25-workspace-');
+  const home = makeTempDir('bm25-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const weak = runCli(
+      ['remember', '--kind', 'fact', 'Server inventory is tracked in the platform notes.'],
+      { cwd: workspace, home },
+    );
+    const strong = runCli(
+      [
+        'remember',
+        '--kind',
+        'procedure',
+        '--tags',
+        'performance,latency',
+        'Server performance latency fixes use request caching and connection pooling.',
+      ],
+      { cwd: workspace, home },
+    );
+    const weakId = weak.stdout.match(/Remembered (mem_[a-f0-9_]+)/)[1];
+    const strongId = strong.stdout.match(/Remembered (mem_[a-f0-9_]+)/)[1];
+
+    const recall = runCli(['recall', '--json', '--limit', '2', 'server performance latency'], {
+      cwd: workspace,
+      home,
+    });
+    const records = JSON.parse(recall.stdout);
+
+    assert.equal(records[0].id, strongId);
+    assert.equal(records.some((record) => record.id === weakId), true);
+    assert.equal(typeof records[0].score, 'number');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('inject prints critical memories for session hooks', () => {
+  const workspace = makeTempDir('inject-workspace-');
+  const home = makeTempDir('inject-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    runCli(['remember', '--kind', 'preference', '--scope', 'global', 'Prefer short hook output.'], {
+      cwd: workspace,
+      home,
+    });
+    runCli(['remember', '--kind', 'procedure', 'Run npm test before release.'], {
+      cwd: workspace,
+      home,
+    });
+
+    const injected = runCli(['inject', '--scope', 'all'], { cwd: workspace, home });
+
+    assert.match(injected.stdout, /Meminisse injected memory/);
+    assert.match(injected.stdout, /Prefer short hook output/);
+    assert.match(injected.stdout, /Run npm test before release/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('encryption stores JSONL records as encrypted envelopes when enabled', () => {
+  const workspace = makeTempDir('encryption-workspace-');
+  const home = makeTempDir('encryption-home-');
+  const env = { MEMINISSE_ENCRYPTION_KEY: 'correct-horse-battery-staple' };
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home, env });
+    runCli(['remember', '--kind', 'fact', 'EncryptedMarker should not appear in plaintext.'], {
+      cwd: workspace,
+      home,
+      env,
+    });
+    const enabled = runCli(['encryption', 'enable', '--scope', 'project'], {
+      cwd: workspace,
+      home,
+      env,
+    });
+    runCli(['remember', '--kind', 'fact', 'EncryptedMarker after enable is searchable.'], {
+      cwd: workspace,
+      home,
+      env,
+    });
+    const recall = runCli(['recall', '--json', 'EncryptedMarker searchable'], {
+      cwd: workspace,
+      home,
+      env,
+    });
+    const raw = fs.readFileSync(
+      path.join(workspace, '.meminisse', 'memory', 'facts.jsonl'),
+      'utf8',
+    );
+    const missingKey = runCliRaw(['recall', 'EncryptedMarker'], { cwd: workspace, home });
+
+    assert.match(enabled.stdout, /project: enabled/);
+    assert.doesNotMatch(raw, /EncryptedMarker/);
+    assert.match(raw, /"encrypted":true/);
+    assert.ok(JSON.parse(recall.stdout).length >= 2);
+    assert.notEqual(missingKey.status, 0);
+    assert.match(missingKey.stderr, /Encryption requires MEMINISSE_ENCRYPTION_KEY/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('legacy records without schema versions remain readable', () => {
+  const workspace = makeTempDir('legacy-schema-workspace-');
+  const home = makeTempDir('legacy-schema-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const memoryPath = path.join(workspace, '.meminisse', 'memory', 'facts.jsonl');
+    fs.writeFileSync(
+      memoryPath,
+      `${JSON.stringify({
+        id: 'mem_20260412_legacy0001',
+        kind: 'fact',
+        summary: 'Legacy schema records can still be recalled.',
+        body: 'Legacy schema compatibility marker.',
+        status: 'active',
+        confidence: 'high',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })}\n`,
+      'utf8',
+    );
+
+    const recall = runCli(['recall', '--json', 'Legacy schema compatibility marker'], {
+      cwd: workspace,
+      home,
+    });
+    const records = JSON.parse(recall.stdout);
+
+    assert.equal(records[0].id, 'mem_20260412_legacy0001');
+    assert.equal(records[0].schema_version, 0);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
@@ -488,6 +680,8 @@ test('status --verbose reports lifecycle and kind breakdowns', () => {
     assert.match(status.stdout, /superseded: 0/);
     assert.match(status.stdout, /deleted: 0/);
     assert.match(status.stdout, /decision: 1/);
+    assert.match(status.stdout, /schema_versions:/);
+    assert.match(status.stdout, /1: 1/);
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });

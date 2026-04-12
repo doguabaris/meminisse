@@ -19,7 +19,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '..');
-const cliPath = path.join(repoRoot, 'plugins', 'meminisse', 'scripts', 'meminisse.js');
+const cliPath = path.join(repoRoot, 'bin', 'meminisse.js');
 const recallFixturePath = path.join(__dirname, 'fixtures', 'recall-quality.json');
 const codexOutputSchemaPath = path.join(__dirname, 'schemas', 'model-answer.schema.json');
 

@@ -15,8 +15,9 @@ documentation, or local installation workflow.
 - Documentation fixes are welcome. This project uses Markdown linting through
   Remark and follows the root README structure for user-facing documentation.
 
-- JavaScript files in `plugins/meminisse/scripts` should use Corev-style file
-  headers and JSDoc comments for exported or important internal functions.
+- JavaScript files in `src/commands`, the supporting category folders under
+  `src`, and `bin` should use clear file headers and JSDoc comments for
+  exported or important internal functions.
 
 - Before submitting a pull request, run:
 

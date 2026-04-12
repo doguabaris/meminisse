@@ -5,4 +5,4 @@ temp/
 .meminisse/
 coverage/
 tests/
-plugins/meminisse/skills/
+skills/

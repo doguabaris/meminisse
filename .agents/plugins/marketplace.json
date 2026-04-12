@@ -8,7 +8,7 @@
       "name": "meminisse",
       "source": {
         "source": "local",
-        "path": "./plugins/meminisse"
+        "path": "."
       },
       "policy": {
         "installation": "AVAILABLE",
