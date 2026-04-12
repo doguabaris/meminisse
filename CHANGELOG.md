@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 / 2026-04-13
+
+* Fixed Docker image publishing by copying the root-level runtime files instead of removed plugin package paths.
+
 ## 0.5.0 / 2026-04-12
 
 * Refactored the CLI from a nested plugin script into root-level `bin`, `src`, `.codex-plugin`, and `skills` paths.
