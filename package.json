@@ -1,11 +1,11 @@
 {
   "name": "meminisse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Always-on persistent memory plugin for Codex.",
   "main": "plugins/meminisse/scripts/meminisse.js",
   "scripts": {
     "meminisse": "node plugins/meminisse/scripts/meminisse.js",
-    "install:home": "node plugins/meminisse/scripts/install-home.js",
+    "install:local": "node plugins/meminisse/scripts/meminisse.js install --local",
     "test": "node --test",
     "test:status": "node plugins/meminisse/scripts/meminisse.js status",
     "lint": "eslint .",
@@ -37,8 +37,7 @@
     "node": ">=20.18.1"
   },
   "bin": {
-    "meminisse": "plugins/meminisse/scripts/meminisse.js",
-    "meminisse-install-home": "plugins/meminisse/scripts/install-home.js"
+    "meminisse": "plugins/meminisse/scripts/meminisse.js"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

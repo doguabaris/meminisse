@@ -69,7 +69,7 @@ You should have:
 2. Install the Codex plugin, skill, and personal marketplace entry.
 
    ```bash
-   meminisse-install-home --force
+   meminisse install --local --force
    ```
 
 3. Confirm that the installer prints paths under
@@ -173,7 +173,8 @@ password assignments, private key blocks, and common access-key formats.
 
 Recall modes are `summary`, `full`, and `ids`. Terminal recall defaults
 to `summary`, limits output with `--max-chars 4000`, and only returns
-active memories.
+active memories. Matching records also receive lightweight recall
+telemetry with `recall_count` and `last_recalled_at`.
 
 ### Inspect and retire memory
 
@@ -205,6 +206,54 @@ active memories.
 of removing JSONL rows. Deleted records are excluded from normal recall
 but remain inspectable with `meminisse list --status deleted`.
 
+### Check and review memory health
+
+1. Check local installation and storage paths.
+
+   ```bash
+   meminisse doctor
+   ```
+
+2. Emit machine-readable checks for scripts.
+
+   ```bash
+   meminisse doctor --json
+   ```
+
+3. Review active records for maintenance issues.
+
+   ```bash
+   meminisse review
+   ```
+
+`doctor` checks the CLI version, package metadata, installed plugin,
+installed skill, marketplace entry, memory paths, and ignore-file
+protection. `review` reports stale version memories, exact duplicate
+active records, and broken project-local path references. Review is
+report-only; it does not change memory records.
+
+### Attach supporting files
+
+1. Attach a file to the current project memory store.
+
+   ```bash
+   meminisse attach ~/Downloads/error-screenshot.png --kind evidence --tags bug,api
+   ```
+
+2. Attach a file with a custom title.
+
+   ```bash
+   meminisse attach ~/Downloads/client-notes.md --kind reference --title "Client notes"
+   ```
+
+Attachments are copied under `.meminisse/attachments/YYYY/MM/<slug>/`.
+Each attachment gets an `original` file, `metadata.json`, and `note.md`.
+Meminisse writes a memory record that points at those project-local
+paths, so future recall can find the supporting file. By default,
+attachments are copied and the original source file is left alone. Pass
+`--move` only when you explicitly want to remove the original source file
+after copying it into `.meminisse`.
+
 ### Consolidate memory
 
 1. Run consolidation after meaningful work or after several memory
@@ -233,6 +282,12 @@ but remain inspectable with `meminisse list --status deleted`.
    meminisse status
    ```
 
+4. Use verbose status when you need lifecycle and kind breakdowns.
+
+   ```bash
+   meminisse status --verbose
+   ```
+
 ## Troubleshooting
 
 The plugin does not appear in Codex after installation
@@ -257,17 +312,17 @@ Recall returns no relevant memories
   is stored under `.meminisse/memory`; global memory is stored under
   `~/.codex/memories/meminisse/memory`.
 
-The home installer does not update an existing installation
+The local installer does not update an existing installation
 
 - Run the installer with `--force`:
 
   ```bash
-  meminisse-install-home --force
+  meminisse install --local --force
   ```
 
 The marketplace path points to an old plugin location
 
-- Re-run the home installer with `--force`.
+- Re-run the local installer with `--force`.
 - Verify that the Meminisse entry in `~/.agents/plugins/marketplace.json`
   uses:
 
@@ -301,25 +356,28 @@ Meminisse stores records in append-only JSONL files. Recall tokenizes the
 query and scores active records using summary text, body text, tags,
 entities, paths, confidence, status, kind, and recency. Recall supports
 summary, full, and id-only output modes plus relevance thresholds and
-character budgets for token efficiency. Consolidation reads active records
-and writes a Markdown summary plus an `index.json` file.
+character budgets for token efficiency. Recall also updates lightweight
+per-record telemetry fields so later status and review work can see which
+records are used. Consolidation reads active records and writes a
+Markdown summary plus an `index.json` file.
 
 Memory lifecycle controls include duplicate detection, secret detection,
-listing, soft deletion, and `--supersedes` handling. When a new memory
-supersedes an older record, the older record is rewritten with
-`status: "superseded"` and excluded from normal recall. When a memory is
-forgotten, it is rewritten with `status: "deleted"` and remains available
-for audit-style inspection through `meminisse list --status deleted`.
+listing, health checks, review reports, soft deletion, and `--supersedes`
+handling. When a new memory supersedes an older record, the older record
+is rewritten with `status: "superseded"` and excluded from normal recall.
+When a memory is forgotten, it is rewritten with `status: "deleted"` and
+remains available for audit-style inspection through
+`meminisse list --status deleted`.
+
+Project attachments are copied into `.meminisse/attachments`. Each
+attachment has a small Markdown note and JSON metadata file, and
+Meminisse writes a normal memory record with paths to those files.
 
 ### Code structure
 
 The `plugins/meminisse/scripts/meminisse.js` module implements the CLI
 commands, memory record format, JSONL storage, recall scoring, and
 consolidation.
-
-The `plugins/meminisse/scripts/install-home.js` module installs the
-plugin into the personal Codex plugin directory and updates the personal
-marketplace file.
 
 The `plugins/meminisse/skills/meminisse` directory contains the Codex
 skill instructions that tell Codex when to recall memory and when to
@@ -360,13 +418,13 @@ How to install:
    1. From a repository checkout, run:
 
       ```bash
-      npm run install:home -- --force
+      npm run install:local -- --force
       ```
 
    2. Or, after global npm installation, run:
 
       ```bash
-      meminisse-install-home --force
+      meminisse install --local --force
       ```
 
    3. Restart Codex so it reloads the personal marketplace.
@@ -382,8 +440,7 @@ How to configure:
 3. Use `~/.codex/memories/meminisse/memory` for global memory and
    `.meminisse/memory` for workspace memory.
 
-4. For npm-installed usage, run `meminisse` and
-   `meminisse-install-home` directly from your shell.
+4. For npm-installed usage, run `meminisse` directly from your shell.
 
 #### Build and test
 
@@ -393,7 +450,7 @@ How to build and run locally:
    1. Run the CLI directly:
 
       ```bash
-      meminisse status
+      meminisse status --verbose
       ```
 
    2. Or run the installed personal copy:
@@ -428,7 +485,7 @@ How to run tests:
     terms or add durable memory with `remember`.
 
 - `Missing required path`
-  - The home installer cannot find the plugin source directory. Run
+  - The local installer cannot find the plugin source directory. Run
     the installer from this repository after confirming
     `plugins/meminisse` exists.
 
@@ -464,7 +521,7 @@ comments for script files.
    1. Run:
 
       ```bash
-      npm run install:home -- --force
+      npm run install:local -- --force
       ```
 
    2. Restart Codex and confirm the marketplace entry still appears.

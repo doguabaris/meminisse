@@ -23,7 +23,6 @@ const packageVersion = JSON.parse(
   fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8'),
 ).version;
 const cliPath = path.join(repoRoot, 'plugins', 'meminisse', 'scripts', 'meminisse.js');
-const installerPath = path.join(repoRoot, 'plugins', 'meminisse', 'scripts', 'install-home.js');
 
 /**
  * Creates an isolated temporary directory for a test.
@@ -203,11 +202,12 @@ function countIgnoreEntry(filePath, entry) {
     .filter((line) => line === entry).length;
 }
 
-test('home installer writes plugin, skill, and marketplace into an isolated HOME', () => {
-  const home = makeTempDir('install-home-');
+test('CLI install --local writes plugin, skill, and marketplace into an isolated HOME', () => {
+  const workspace = makeTempDir('install-local-workspace-');
+  const home = makeTempDir('install-local-home-');
 
   try {
-    runNode(installerPath, ['--force'], { home });
+    runCli(['install', '--local', '--force'], { cwd: workspace, home });
 
     const pluginTarget = path.join(home, '.codex', 'plugins', 'meminisse');
     const skillTarget = path.join(home, '.codex', 'skills', 'meminisse');
@@ -215,7 +215,7 @@ test('home installer writes plugin, skill, and marketplace into an isolated HOME
 
     fs.mkdirSync(pluginTarget, { recursive: true });
     fs.writeFileSync(path.join(pluginTarget, 'STALE.md'), 'stale file\n', 'utf8');
-    runNode(installerPath, ['--force'], { home: home });
+    runCli(['install', '--local', '--force'], { cwd: workspace, home });
 
     assert.ok(fs.existsSync(path.join(pluginTarget, '.codex-plugin', 'plugin.json')));
     assert.ok(fs.existsSync(path.join(pluginTarget, 'scripts', 'meminisse.js')));
@@ -233,13 +233,39 @@ test('home installer writes plugin, skill, and marketplace into an isolated HOME
     assert.equal(entry.policy.authentication, 'ON_USE');
 
     const installedCli = path.join(pluginTarget, 'scripts', 'meminisse.js');
-    const installedInstaller = path.join(pluginTarget, 'scripts', 'install-home.js');
     const version = runNode(installedCli, ['--version'], { home });
     assert.equal(version.stdout.trim(), packageVersion);
-
-    runNode(installedInstaller, ['--force'], { home });
-    assert.ok(fs.existsSync(path.join(pluginTarget, '.codex-plugin', 'plugin.json')));
+    assert.equal(fs.existsSync(path.join(pluginTarget, 'scripts', 'install-home.js')), false);
   } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('CLI install --local installs home plugin and doctor reports healthy paths', () => {
+  const workspace = makeTempDir('doctor-workspace-');
+  const home = makeTempDir('doctor-home-');
+
+  try {
+    runCli(['install', '--local', '--force'], { cwd: workspace, home });
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+
+    const pluginTarget = path.join(home, '.codex', 'plugins', 'meminisse');
+    const skillTarget = path.join(home, '.codex', 'skills', 'meminisse');
+    const doctor = runCli(['doctor', '--json'], { cwd: workspace, home });
+    const checks = JSON.parse(doctor.stdout);
+    const byName = new Map(checks.map((check) => [check.name, check]));
+
+    assert.ok(fs.existsSync(path.join(pluginTarget, '.codex-plugin', 'plugin.json')));
+    assert.ok(fs.existsSync(path.join(skillTarget, 'SKILL.md')));
+    assert.equal(byName.get('CLI version').detail, packageVersion);
+    assert.equal(byName.get('installed plugin version').status, 'ok');
+    assert.equal(byName.get('installed skill').status, 'ok');
+    assert.equal(byName.get('marketplace entry').status, 'ok');
+    assert.equal(byName.get('project memory').status, 'ok');
+    assert.equal(byName.get('.meminisse gitignore entry').status, 'ok');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
@@ -430,6 +456,135 @@ test('recall supports token-efficient modes, thresholds, and max character budge
     assert.match(full.stdout, /truncated/);
     assert.match(ids.stdout, /mem_[0-9]{8}_[a-f0-9]{10} score=/);
     assert.match(threshold.stdout, /No relevant memories found/);
+
+    const records = fs
+      .readFileSync(path.join(workspace, '.meminisse', 'memory', 'facts.jsonl'), 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    assert.equal(records[0].recall_count, 3);
+    assert.match(records[0].last_recalled_at, /^\d{4}-\d{2}-\d{2}T/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('status --verbose reports lifecycle and kind breakdowns', () => {
+  const workspace = makeTempDir('verbose-status-workspace-');
+  const home = makeTempDir('verbose-status-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    runCli(['remember', '--kind', 'decision', 'Use verbose status for memory audits.'], {
+      cwd: workspace,
+      home,
+    });
+
+    const status = runCli(['status', '--scope', 'project', '--verbose'], { cwd: workspace, home });
+
+    assert.match(status.stdout, /project:/);
+    assert.match(status.stdout, /active: 1/);
+    assert.match(status.stdout, /superseded: 0/);
+    assert.match(status.stdout, /deleted: 0/);
+    assert.match(status.stdout, /decision: 1/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('review reports stale versions, duplicates, and broken local paths', () => {
+  const workspace = makeTempDir('review-workspace-');
+  const home = makeTempDir('review-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const duplicateText = 'Duplicate review marker memory should be detected.';
+    runCli(
+      [
+        'remember',
+        '--kind',
+        'fact',
+        `Current Meminisse package snapshot says version 0.1.0 even though it is stale.`,
+      ],
+      { cwd: workspace, home },
+    );
+    runCli(['remember', '--kind', 'fact', duplicateText], { cwd: workspace, home });
+    runCli(['remember', '--kind', 'fact', '--force', duplicateText], { cwd: workspace, home });
+    runCli(
+      [
+        'remember',
+        '--kind',
+        'fact',
+        '--paths',
+        '.meminisse/missing-review-file.md',
+        'Review should report a missing project-local path.',
+      ],
+      { cwd: workspace, home },
+    );
+
+    const review = runCli(['review', '--scope', 'project', '--json'], { cwd: workspace, home });
+    const report = JSON.parse(review.stdout);
+    const text = runCli(['review', '--scope', 'project'], { cwd: workspace, home });
+
+    assert.equal(report.summary.stale, 1);
+    assert.equal(report.summary.duplicates, 1);
+    assert.equal(report.summary.broken_paths, 1);
+    assert.match(text.stdout, /Stale memories/);
+    assert.match(text.stdout, /Duplicate candidates/);
+    assert.match(text.stdout, /Broken path references/);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('attach copies a file into project attachments and remembers its paths', () => {
+  const workspace = makeTempDir('attach-workspace-');
+  const home = makeTempDir('attach-home-');
+  const source = path.join(workspace, 'source-note.md');
+
+  try {
+    fs.writeFileSync(source, '# Source Note\n\nAttachment body.\n', 'utf8');
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+
+    const attached = runCli(
+      [
+        'attach',
+        source,
+        '--kind',
+        'evidence',
+        '--title',
+        'Source Note',
+        '--tags',
+        'attach,test',
+      ],
+      { cwd: workspace, home },
+    );
+    const id = attached.stdout.match(/Attached (mem_[a-f0-9_]+)/)[1];
+    const notePath = path.join(
+      workspace,
+      '.meminisse',
+      'attachments',
+      new Date().toISOString().slice(0, 4),
+      new Date().toISOString().slice(5, 7),
+      'source-note',
+      'note.md',
+    );
+    const recall = runCli(['recall', '--json', 'Source Note attachment evidence'], {
+      cwd: workspace,
+      home,
+    });
+    const records = JSON.parse(recall.stdout);
+    const attachedRecord = records.find((record) => record.id === id);
+
+    assert.ok(fs.existsSync(source));
+    assert.ok(fs.existsSync(notePath));
+    assert.match(fs.readFileSync(notePath, 'utf8'), /# Source Note/);
+    assert.ok(attachedRecord);
+    assert.ok(attachedRecord.paths.some((recordPath) => recordPath.endsWith('/note.md')));
+    assert.ok(attachedRecord.paths.some((recordPath) => recordPath.endsWith('/original.md')));
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });

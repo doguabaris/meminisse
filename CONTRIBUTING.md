@@ -29,7 +29,7 @@ documentation, or local installation workflow.
 - If you change plugin packaging or installation behavior, also run:
 
   ```bash
-  npm run install:home -- --force
+  npm run install:local -- --force
   ```
 
   Then restart Codex and confirm that the personal marketplace still shows
