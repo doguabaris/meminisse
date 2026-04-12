@@ -13,6 +13,8 @@
  * - recall: searches relevant memories using tags, entities, paths, body text, and recency.
  * - compact: writes a consolidated Markdown summary for fast future retrieval.
  * - status: prints active memory counts.
+ * - list: prints stored memory records without requiring a search query.
+ * - forget: marks active memory records as deleted by ID.
  *
  * Usage:
  *   meminisse init --scope all
@@ -30,7 +32,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '0.1.1';
+const VERSION = '0.2.0';
 const PROJECT_DIR = '.meminisse';
 const MEMORY_DIR = 'memory';
 const GLOBAL_ROOT = path.join(os.homedir(), '.codex', 'memories', 'meminisse');
@@ -50,6 +52,7 @@ const KINDS = new Set(Object.keys(FILES));
 const RECALL_MODES = new Set(['summary', 'full', 'ids']);
 const BOOLEAN_FLAGS = new Set(['allow-secret', 'force', 'json']);
 const DEFAULT_RECALL_LIMIT = 8;
+const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_RECALL_MAX_CHARS = 4000;
 const SECRET_PATTERNS = [
   { name: 'private key block', pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
@@ -124,6 +127,15 @@ function main() {
       case 'compact':
       case 'consolidate':
         compactCommand(args);
+        break;
+      case 'list':
+      case 'ls':
+        listCommand(args);
+        break;
+      case 'forget':
+      case 'delete':
+      case 'remove':
+        forgetCommand(args);
         break;
       case 'status':
         statusCommand(args);
@@ -353,6 +365,89 @@ function compactCommand(args) {
 }
 
 /**
+ * Lists memories without requiring a recall query.
+ *
+ * @param {string[]} args - CLI arguments for the list command.
+ * @returns {void}
+ */
+function listCommand(args) {
+  const { opts } = parseOptions(args);
+  const scope = normalizeScope(opts.scope || 'all');
+  const status = normalizeStatusFilter(opts.status || 'active');
+  const kind = opts.kind ? normalizeKind(opts.kind) : undefined;
+  const limit = toPositiveInt(opts.limit, DEFAULT_LIST_LIMIT);
+  const records = readRecordsWithScope(scope)
+    .filter((item) => status === 'all' || item.record.status === status)
+    .filter((item) => !kind || item.record.kind === kind)
+    .sort((a, b) => compareDateDesc(a.record, b.record))
+    .slice(0, limit);
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        records.map((item) => ({ scope: item.scope, ...item.record })),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  if (records.length === 0) {
+    console.log('No memories found.');
+    return;
+  }
+
+  console.log(formatList(records, { kind, limit, scope, status }));
+}
+
+/**
+ * Marks active memories as deleted.
+ *
+ * @param {string[]} args - CLI arguments for the forget command.
+ * @returns {void}
+ */
+function forgetCommand(args) {
+  const { opts, rest } = parseOptions(args);
+  const scope = normalizeScope(opts.scope || 'all');
+  const ids = splitList(opts.ids).concat(splitList(opts.id), splitArgsList(rest));
+  if (ids.length === 0) {
+    fail('Usage: meminisse forget [--scope project|global|all] <memory-id> [memory-id...]');
+  }
+
+  const uniqueIds = uniqueArray(ids);
+  const roots =
+    scope === 'all'
+      ? [
+          ['project', projectMemoryPath()],
+          ['global', globalMemoryPath()],
+        ]
+      : [[scope, scopePath(scope)]];
+  const now = new Date().toISOString();
+  const reason = normalizeText(opts.reason);
+  const deleted = [];
+
+  for (const [name, root] of roots) {
+    const changed = markDeleted(root, uniqueIds, now, reason);
+    if (changed.length > 0) {
+      refreshIndex(root);
+      for (const id of changed) {
+        deleted.push(`${id} (${name})`);
+      }
+    }
+  }
+
+  if (deleted.length === 0) {
+    fail(`No matching active memories found for: ${uniqueIds.join(', ')}`);
+  }
+
+  console.log(`Forgot ${deleted.length} ${deleted.length === 1 ? 'memory' : 'memories'}:`);
+  for (const item of deleted) {
+    console.log(`- ${item}`);
+  }
+}
+
+/**
  * Writes a Markdown summary and refreshed index for a single memory scope.
  *
  * @param {'project' | 'global'} scope - The memory scope to consolidate.
@@ -444,6 +539,20 @@ function readRecordsForScope(scope) {
   }
 
   return readRecords(scopePath(scope));
+}
+
+/**
+ * Reads memory records annotated with their originating scope.
+ *
+ * @param {'project' | 'global' | 'all'} scope - The scope to load.
+ * @returns {{ scope: 'project' | 'global', record: object }[]} Scoped records.
+ */
+function readRecordsWithScope(scope) {
+  if (scope === 'all') {
+    return readRecordsWithScope('project').concat(readRecordsWithScope('global'));
+  }
+
+  return readRecords(scopePath(scope)).map((record) => ({ scope, record }));
 }
 
 /**
@@ -541,6 +650,57 @@ function markSuperseded(root, ids, supersededBy, now) {
               ...record,
               status: 'superseded',
               superseded_by: supersededBy,
+              updated_at: now,
+            }),
+          );
+          continue;
+        }
+      } catch {
+        nextLines.push(line);
+        continue;
+      }
+
+      nextLines.push(line);
+    }
+
+    fs.writeFileSync(filePath, nextLines.length ? `${nextLines.join('\n')}\n` : '', 'utf8');
+  }
+
+  return updated;
+}
+
+/**
+ * Marks active records as deleted.
+ *
+ * @param {string} root - Memory root directory.
+ * @param {string[]} ids - Memory record IDs to delete.
+ * @param {string} now - ISO timestamp for the lifecycle update.
+ * @param {string} reason - Optional deletion reason.
+ * @returns {string[]} IDs of records marked deleted.
+ */
+function markDeleted(root, ids, now, reason) {
+  const targets = new Set(ids);
+  const updated = [];
+
+  for (const filename of uniqueArray(Object.values(FILES))) {
+    const filePath = path.join(root, filename);
+    if (!fs.existsSync(filePath)) {
+      continue;
+    }
+
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
+    const nextLines = [];
+
+    for (const line of lines) {
+      try {
+        const record = JSON.parse(line);
+        if (targets.has(record.id) && record.status === 'active') {
+          updated.push(record.id);
+          nextLines.push(
+            JSON.stringify({
+              ...record,
+              status: 'deleted',
+              ...(reason ? { deleted_reason: reason } : {}),
               updated_at: now,
             }),
           );
@@ -700,6 +860,32 @@ function renderRecallItem(item, mode) {
   }
 
   return lines;
+}
+
+/**
+ * Formats list results for terminal output.
+ *
+ * @param {{ scope: string, record: object }[]} items - Scoped records to print.
+ * @param {{ scope: string, status: string, kind?: string, limit: number }} options - List filters.
+ * @returns {string} Human-readable memory listing.
+ */
+function formatList(items, options) {
+  const kind = options.kind ? ` kind=${options.kind}` : '';
+  const lines = [
+    `Memories (scope=${options.scope} status=${options.status}${kind} limit=${options.limit})`,
+  ];
+
+  for (const item of items) {
+    const record = item.record;
+    const updated = (record.updated_at || record.created_at || '').slice(0, 10) || 'unknown-date';
+    const tags =
+      record.tags && record.tags.length ? ` #${record.tags.slice(0, 4).join(' #')}` : '';
+    lines.push(
+      `- ${record.id} [${item.scope}/${record.kind}/${record.status}/${record.confidence}] ${updated} ${record.summary}${tags}`,
+    );
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -1028,6 +1214,21 @@ function normalizeStatus(status) {
 }
 
 /**
+ * Validates and normalizes a list status filter.
+ *
+ * @param {string} status - Raw status filter.
+ * @returns {'active' | 'superseded' | 'deleted' | 'all'} Normalized status filter.
+ */
+function normalizeStatusFilter(status) {
+  const normalized = normalizeText(status).toLowerCase();
+  if (normalized === 'all') {
+    return normalized;
+  }
+
+  return normalizeStatus(normalized);
+}
+
+/**
  * Validates and normalizes recall output mode.
  *
  * @param {string} mode - Raw recall output mode.
@@ -1135,6 +1336,16 @@ function splitList(value) {
 }
 
 /**
+ * Splits positional ID arguments that may contain comma-delimited values.
+ *
+ * @param {string[]} values - Positional CLI arguments.
+ * @returns {string[]} Parsed IDs.
+ */
+function splitArgsList(values) {
+  return values.flatMap((value) => splitList(value));
+}
+
+/**
  * Normalizes arbitrary input into trimmed text.
  *
  * @param {unknown} value - Value to stringify and trim.
@@ -1236,6 +1447,8 @@ Usage:
   meminisse init [--scope project|global|all]
   meminisse remember [--kind decision|fact|procedure|preference|event] [--scope project|global] [--supersedes id] <text>
   meminisse recall [--scope project|global|all] [--limit 8] [--mode summary|full|ids] [--max-chars 4000] [--threshold 1] [--json] <query>
+  meminisse list [--scope project|global|all] [--status active|superseded|deleted|all] [--kind decision] [--limit 20] [--json]
+  meminisse forget [--scope project|global|all] [--reason text] <memory-id> [memory-id...]
   meminisse compact [--scope project|global|all]
   meminisse status [--scope project|global|all]
 
@@ -1243,6 +1456,8 @@ Examples:
   meminisse remember --kind decision "Use npm for this project."
   meminisse remember --kind decision --supersedes mem_20260412_abcd123456 "Use Node test runner for integration tests."
   meminisse remember --kind preference --scope global "The user prefers concise Turkish updates."
+  meminisse list --status all --limit 5
+  meminisse forget mem_20260412_abcd123456 --reason "Outdated project decision."
   meminisse recall --mode ids --max-chars 1200 "package manager and project decisions"
 `);
 }

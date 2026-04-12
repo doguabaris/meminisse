@@ -340,6 +340,64 @@ test('remember supersedes older records and recall ignores superseded memories',
   }
 });
 
+test('list inspects memories and forget soft-deletes active records', () => {
+  const workspace = makeTempDir('forget-workspace-');
+  const home = makeTempDir('forget-home-');
+
+  try {
+    runCli(['init', '--scope', 'all'], { cwd: workspace, home });
+    const remembered = runCli(
+      [
+        'remember',
+        '--kind',
+        'fact',
+        '--tags',
+        'forget-marker',
+        'ForgetMarker records can be inspected and retired by id.',
+      ],
+      { cwd: workspace, home },
+    );
+    const id = remembered.stdout.match(/Remembered (mem_[a-f0-9_]+)/)[1];
+
+    const activeList = runCli(['list', '--scope', 'project'], { cwd: workspace, home });
+    const jsonList = runCli(['list', '--scope', 'project', '--json'], { cwd: workspace, home });
+    const listedRecords = JSON.parse(jsonList.stdout);
+
+    assert.match(activeList.stdout, new RegExp(id));
+    assert.equal(listedRecords[0].scope, 'project');
+    assert.equal(listedRecords[0].id, id);
+
+    const forgotten = runCli(
+      ['forget', '--scope', 'project', '--reason', 'Retired during lifecycle test.', id],
+      { cwd: workspace, home },
+    );
+    const status = runCli(['status', '--scope', 'project'], { cwd: workspace, home });
+    const recall = runCli(['recall', 'ForgetMarker'], { cwd: workspace, home });
+    const deletedList = runCli(
+      ['list', '--scope', 'project', '--status', 'deleted', '--kind', 'fact'],
+      { cwd: workspace, home },
+    );
+    const defaultList = runCli(['list', '--scope', 'project'], { cwd: workspace, home });
+    const records = fs
+      .readFileSync(path.join(workspace, '.meminisse', 'memory', 'facts.jsonl'), 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    const deletedRecord = records.find((record) => record.id === id);
+
+    assert.match(forgotten.stdout, /Forgot 1 memory/);
+    assert.match(status.stdout, /project: 0\/1 active memories/);
+    assert.match(recall.stdout, /No relevant memories found/);
+    assert.match(deletedList.stdout, new RegExp(id));
+    assert.match(defaultList.stdout, /No memories found/);
+    assert.equal(deletedRecord.status, 'deleted');
+    assert.equal(deletedRecord.deleted_reason, 'Retired during lifecycle test.');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test('recall supports token-efficient modes, thresholds, and max character budgets', () => {
   const workspace = makeTempDir('recall-budget-workspace-');
   const home = makeTempDir('recall-budget-home-');

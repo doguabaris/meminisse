@@ -175,6 +175,36 @@ Recall modes are `summary`, `full`, and `ids`. Terminal recall defaults
 to `summary`, limits output with `--max-chars 4000`, and only returns
 active memories.
 
+### Inspect and retire memory
+
+1. List active records without a search query.
+
+   ```bash
+   meminisse list --scope all --limit 20
+   ```
+
+2. Include records that were superseded or deleted.
+
+   ```bash
+   meminisse list --status all
+   ```
+
+3. Filter by kind or emit JSON for scripts.
+
+   ```bash
+   meminisse list --kind decision --json
+   ```
+
+4. Retire an outdated active memory by ID.
+
+   ```bash
+   meminisse forget mem_20260412_abcd123456 --reason "Outdated project decision."
+   ```
+
+`forget` marks matching active records with `status: "deleted"` instead
+of removing JSONL rows. Deleted records are excluded from normal recall
+but remain inspectable with `meminisse list --status deleted`.
+
 ### Consolidate memory
 
 1. Run consolidation after meaningful work or after several memory
@@ -275,9 +305,11 @@ character budgets for token efficiency. Consolidation reads active records
 and writes a Markdown summary plus an `index.json` file.
 
 Memory lifecycle controls include duplicate detection, secret detection,
-and `--supersedes` handling. When a new memory supersedes an older record,
-the older record is rewritten with `status: "superseded"` and excluded
-from normal recall.
+listing, soft deletion, and `--supersedes` handling. When a new memory
+supersedes an older record, the older record is rewritten with
+`status: "superseded"` and excluded from normal recall. When a memory is
+forgotten, it is rewritten with `status: "deleted"` and remains available
+for audit-style inspection through `meminisse list --status deleted`.
 
 ### Code structure
 
