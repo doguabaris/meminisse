@@ -30,7 +30,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '0.1.0';
+const VERSION = '0.1.1';
 const PROJECT_DIR = '.meminisse';
 const MEMORY_DIR = 'memory';
 const GLOBAL_ROOT = path.join(os.homedir(), '.codex', 'memories', 'meminisse');
@@ -528,28 +528,31 @@ function markSuperseded(root, ids, supersededBy, now) {
       continue;
     }
 
-    const nextLines = fs
-      .readFileSync(filePath, 'utf8')
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .map((line) => {
-        try {
-          const record = JSON.parse(line);
-          if (targets.has(record.id) && record.status === 'active') {
-            updated += 1;
-            return JSON.stringify({
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean);
+    const nextLines = [];
+
+    for (const line of lines) {
+      try {
+        const record = JSON.parse(line);
+        if (targets.has(record.id) && record.status === 'active') {
+          updated += 1;
+          nextLines.push(
+            JSON.stringify({
               ...record,
               status: 'superseded',
               superseded_by: supersededBy,
               updated_at: now,
-            });
-          }
-        } catch {
-          return line;
+            }),
+          );
+          continue;
         }
+      } catch {
+        nextLines.push(line);
+        continue;
+      }
 
-        return line;
-      });
+      nextLines.push(line);
+    }
 
     fs.writeFileSync(filePath, nextLines.length ? `${nextLines.join('\n')}\n` : '', 'utf8');
   }
