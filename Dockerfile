@@ -5,7 +5,8 @@ WORKDIR /app
 
 COPY package.json package-lock.json ./
 COPY README.md LICENSE ./
-COPY .agents ./.agents
+COPY plugins* ./plugins/ || true
+COPY .agents* ./.agents/ || true
 
 RUN npm ci --omit=dev && npm install -g .
 
