@@ -22,6 +22,7 @@ documentation, or local installation workflow.
 
   ```bash
   npm test
+  npm run benchmark
   npm run lint
   npm run lint:md
   ```

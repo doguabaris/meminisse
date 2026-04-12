@@ -36,7 +36,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const PROJECT_DIR = '.meminisse';
 const MEMORY_DIR = 'memory';
 const ATTACHMENTS_DIR = 'attachments';

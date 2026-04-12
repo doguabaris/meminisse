@@ -232,6 +232,33 @@ protection. `review` reports stale version memories, exact duplicate
 active records, and broken project-local path references. Review is
 report-only; it does not change memory records.
 
+### Run local benchmarks
+
+1. Run the deterministic benchmark suite.
+
+   ```bash
+   npm run benchmark
+   ```
+
+2. Emit JSON output for scripts.
+
+   ```bash
+   npm run benchmark -- --json
+   ```
+
+3. Measure answer quality for a Codex model.
+
+   ```bash
+   npm run benchmark -- --model gpt-5.4 --model-limit 2
+   ```
+
+The benchmark runner creates isolated temporary workspaces and HOME
+directories, writes known memory fixtures through the real CLI, then
+measures recall quality, lifecycle leakage, and review signals. It uses
+no external datasets, non-Codex model providers, or the user's real
+memory stores. Model-backed benchmark runs are optional and use
+`codex exec --model <model>`.
+
 ### Attach supporting files
 
 1. Attach a file to the current project memory store.
@@ -372,6 +399,11 @@ remains available for audit-style inspection through
 Project attachments are copied into `.meminisse/attachments`. Each
 attachment has a small Markdown note and JSON metadata file, and
 Meminisse writes a normal memory record with paths to those files.
+
+Benchmarks live under `benchmarks/` and run with `npm run benchmark`.
+They exercise deterministic local fixtures through the real CLI and
+report recall quality, lifecycle safety, review signal quality, and
+optional Codex model answer/citation accuracy.
 
 ### Code structure
 

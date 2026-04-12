@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer", "memory_id"],
+  "properties": {
+    "answer": {
+      "type": "string"
+    },
+    "memory_id": {
+      "type": "string"
+    }
+  }
+}

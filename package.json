@@ -1,10 +1,11 @@
 {
   "name": "meminisse",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Always-on persistent memory plugin for Codex.",
   "main": "plugins/meminisse/scripts/meminisse.js",
   "scripts": {
     "meminisse": "node plugins/meminisse/scripts/meminisse.js",
+    "benchmark": "node benchmarks/run-benchmarks.js",
     "install:local": "node plugins/meminisse/scripts/meminisse.js install --local",
     "test": "node --test",
     "test:status": "node plugins/meminisse/scripts/meminisse.js status",

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 / 2026-04-12
+
+* Added a deterministic local benchmark suite for recall quality, lifecycle safety, and review signals.
+
+* Added `npm run benchmark` with text and JSON output.
+
+* Added optional Codex model-backed benchmark measurement with answer and citation accuracy.
+
 ## 0.3.0 / 2026-04-12
 
 * Added `meminisse install --local` as the preferred local Codex install command.

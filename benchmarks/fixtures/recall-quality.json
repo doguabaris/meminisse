@@ -1,0 +1,73 @@
+{
+  "name": "recall-quality",
+  "description": "Small deterministic recall fixture for Meminisse scoring.",
+  "memories": [
+    {
+      "logical_id": "install-local",
+      "kind": "decision",
+      "tags": ["install", "local", "codex"],
+      "text": "Meminisse 0.3.0 uses meminisse install --local --force as the only supported local Codex install command."
+    },
+    {
+      "logical_id": "release-workflow",
+      "kind": "procedure",
+      "tags": ["release", "workflow", "npm"],
+      "text": "Meminisse release workflow is git status, stage release files, git add -u deleted files, commit Release X.Y.Z, tag vX.Y.Z, npm publish, push main and tag, install globally, run meminisse install --local --force, then run meminisse doctor."
+    },
+    {
+      "logical_id": "attach-vault",
+      "kind": "fact",
+      "tags": ["attach", "attachments", "files"],
+      "text": "Meminisse attach copies support files into .meminisse/attachments/YYYY/MM/slug with original file, metadata.json, note.md, and a memory record containing those paths."
+    },
+    {
+      "logical_id": "doctor-health",
+      "kind": "fact",
+      "tags": ["doctor", "health", "install"],
+      "text": "Meminisse doctor checks CLI version, package version, bundled plugin manifest, installed plugin, installed skill, marketplace entry, project memory, global memory parent, and .meminisse gitignore coverage."
+    },
+    {
+      "logical_id": "review-maintenance",
+      "kind": "fact",
+      "tags": ["review", "maintenance", "stale"],
+      "text": "Meminisse review reports stale version memories, duplicate active records, and broken project-local path references without changing stored records."
+    }
+  ],
+  "queries": [
+    {
+      "name": "local install command",
+      "query": "what command installs Meminisse into local Codex",
+      "expected": "install-local",
+      "top_k": 3,
+      "expected_terms": ["meminisse install --local --force"]
+    },
+    {
+      "name": "release procedure",
+      "query": "release workflow after npm publish and tag",
+      "expected": "release-workflow",
+      "top_k": 3,
+      "expected_terms": ["git status", "commit Release X.Y.Z", "tag vX.Y.Z", "npm publish"]
+    },
+    {
+      "name": "attached files",
+      "query": "where does attach store support files",
+      "expected": "attach-vault",
+      "top_k": 3,
+      "expected_terms": [".meminisse/attachments", "metadata.json", "note.md"]
+    },
+    {
+      "name": "doctor checks",
+      "query": "doctor health checks installed plugin marketplace gitignore",
+      "expected": "doctor-health",
+      "top_k": 3,
+      "expected_terms": ["CLI version", "installed plugin", "marketplace", ".meminisse gitignore"]
+    },
+    {
+      "name": "review checks",
+      "query": "review stale duplicate broken path references",
+      "expected": "review-maintenance",
+      "top_k": 3,
+      "expected_terms": ["stale version", "duplicate", "broken project-local path"]
+    }
+  ]
+}
