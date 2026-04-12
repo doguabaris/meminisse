@@ -1,4 +1,5 @@
 ## Meminisse
+![Image](https://repository-images.githubusercontent.com/1208407736/ee74b993-19a7-4418-b1ca-55cbd42698bd)
 
 This tool helps you give Codex always-on persistent memory across
 sessions. It stores durable global and workspace context so that Codex can
