@@ -6,7 +6,7 @@
  */
 'use strict';
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const MEMORY_SCHEMA_VERSION = 1;
 const DEFAULT_ENCRYPTION_KEY_ENV = 'MEMINISSE_ENCRYPTION_KEY';
 const ENCRYPTION_CONFIG_FILE = 'encryption.json';

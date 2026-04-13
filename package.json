@@ -1,6 +1,6 @@
 {
   "name": "meminisse",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Always-on persistent memory plugin for Codex.",
   "main": "src/cli.js",
   "scripts": {

@@ -1,6 +1,6 @@
 {
   "name": "meminisse",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Always-on persistent global and workspace memory for Codex sessions.",
   "author": {
     "name": "Doğu Abaris",

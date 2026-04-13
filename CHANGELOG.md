@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2 / 2026-04-13
+
+* Add GitHub Actions workflow for Node.js package
+* Create CodeQL workflow for security analysis
+
 ## 0.5.1 / 2026-04-13
 
 * Fixed Docker image publishing by copying the root-level runtime files instead of removed plugin package paths.
