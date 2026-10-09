@@ -8,7 +8,8 @@
 
 const { MEMORY_SCHEMA_VERSION } = require('../constants');
 const { parseOptions } = require('../core/options');
-const { detectSecret } = require('../security/secrets');
+const { assertNoSecrets } = require('../security/secrets');
+const { withMemoryLock } = require('../system/file-safety');
 const { extractEntities, extractPaths, extractTags } = require('../memory/recall');
 const {
   contentHash,
@@ -53,60 +54,61 @@ function rememberCommand(args) {
     throw new Error('Usage: meminisse remember [--kind decision] [--scope project] <text>');
   }
 
-  const secret = detectSecret(body);
-  if (secret && !opts['allow-secret']) {
-    throw new Error(
-      `Possible ${secret} detected. Refusing to store it. Remove the secret or pass --allow-secret if this is intentionally non-sensitive.`,
-    );
-  }
+  const allowSecret = opts['allow-secret'] === true || opts['allow-secret'] === 'true';
+  assertNoSecrets(
+    [body, opts.summary, opts.tags, opts.entities, opts.source, opts.event, opts.supersedes],
+    allowSecret,
+  );
+  assertNoSecrets(splitList(opts.paths), allowSecret, { pathValues: true });
 
   const kind = normalizeKind(opts.kind || 'note');
   const scope = normalizeScope(opts.scope || defaultScopeForKind(kind));
   const root = scopePath(scope);
-  if (scope === 'project') {
-    ensureProjectProfile();
-    ensureProjectIgnoreFiles();
-  }
+  return withMemoryLock(root, () => {
+    if (scope === 'project') {
+      ensureProjectProfile();
+      ensureProjectIgnoreFiles();
+    }
 
-  const hash = contentHash(kind, body);
-  const duplicate = findDuplicate(root, kind, hash, body);
-  if (duplicate && !opts.force) {
-    console.log(
-      `Duplicate memory exists: ${duplicate.id} (${scope}/${kind}). Use --force to store again.`,
-    );
-    return;
-  }
+    const hash = contentHash(kind, body);
+    const duplicate = findDuplicate(root, kind, hash, body);
+    if (duplicate && !opts.force) {
+      console.log(
+        `Duplicate memory exists: ${duplicate.id} (${scope}/${kind}). Use --force to store again.`,
+      );
+      return;
+    }
 
-  const now = new Date().toISOString();
-  const record = {
-    schema_version: MEMORY_SCHEMA_VERSION,
-    id: makeId('mem', `${scope}:${kind}:${body}:${now}`),
-    kind,
-    memory_type: normalizeMemoryType(opts.type || defaultMemoryTypeForKind(kind)),
-    event_id: normalizeText(opts.event || makeId('evt', `${process.cwd()}:${dayStamp(now)}`)),
-    boundary: normalizeBoundary(opts.boundary || defaultBoundaryForKind(kind)),
-    summary: normalizeText(opts.summary || summarize(body)),
-    body,
-    tags: splitList(opts.tags).concat(extractTags(body)).filter(isUniqueValue),
-    entities: splitList(opts.entities).concat(extractEntities(body)).filter(isUniqueValue),
-    paths: splitList(opts.paths).concat(extractPaths(body)).filter(isUniqueValue),
-    source: normalizeText(opts.source || 'user'),
-    confidence: normalizeConfidence(opts.confidence || 'high'),
-    status: normalizeStatus(opts.status || 'active'),
-    supersedes: splitList(opts.supersedes),
-    content_hash: hash,
-    project: projectIdentity(),
-    created_at: now,
-    updated_at: now,
-  };
+    const now = new Date().toISOString();
+    const record = {
+      schema_version: MEMORY_SCHEMA_VERSION,
+      id: makeId('mem', `${scope}:${kind}:${body}:${now}`),
+      kind,
+      memory_type: normalizeMemoryType(opts.type || defaultMemoryTypeForKind(kind)),
+      event_id: normalizeText(opts.event || makeId('evt', `${process.cwd()}:${dayStamp(now)}`)),
+      boundary: normalizeBoundary(opts.boundary || defaultBoundaryForKind(kind)),
+      summary: normalizeText(opts.summary || summarize(body)),
+      body,
+      tags: splitList(opts.tags).concat(extractTags(body)).filter(isUniqueValue),
+      entities: splitList(opts.entities).concat(extractEntities(body)).filter(isUniqueValue),
+      paths: splitList(opts.paths).concat(extractPaths(body)).filter(isUniqueValue),
+      source: normalizeText(opts.source || 'user'),
+      confidence: normalizeConfidence(opts.confidence || 'high'),
+      status: normalizeStatus(opts.status || 'active'),
+      supersedes: splitList(opts.supersedes),
+      content_hash: hash,
+      project: projectIdentity(),
+      created_at: now,
+      updated_at: now,
+    };
 
-  if (record.supersedes.length > 0) {
-    markSuperseded(root, record.supersedes, record.id, now);
-  }
-
-  writeRecord(root, fileForKind(kind), record);
-  refreshIndex(root);
-  console.log(`Remembered ${record.id} (${scope}/${kind}).`);
+    writeRecord(root, fileForKind(kind), record);
+    if (record.supersedes.length > 0) {
+      markSuperseded(root, record.supersedes, record.id, now);
+    }
+    refreshIndex(root);
+    console.log(`Remembered ${record.id} (${scope}/${kind}).`);
+  });
 }
 
 /**

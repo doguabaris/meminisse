@@ -62,18 +62,18 @@ function buildReviewReport(scope) {
 }
 
 /**
- * Finds memories that mention older package versions as current.
+ * Finds memories that explicitly describe older Meminisse versions as current.
  *
  * @param {{ scope: string, record: object }[]} items - Active scoped records.
  * @returns {object[]} Stale memory findings.
  */
 function findStaleMemories(items) {
   const findings = [];
-  const versionPattern = /\b\d+\.\d+\.\d+\b/g;
+  const versionPattern = /\bmeminisse(?:['’]s)?(?:\s+(?:current|currently|package|benchmark|release|snapshot|version|plugin|cli|latest|published|aligned|with|says|incorrectly|is|at|of|the|has|a))*\s*[:=]?\s+v?(\d+\.\d+\.\d+)\b/gi;
 
   for (const item of items) {
     const text = `${item.record.summary || ''}\n${item.record.body || ''}`;
-    const versions = uniqueArray(text.match(versionPattern) || []);
+    const versions = uniqueArray([...text.matchAll(versionPattern)].map((match) => match[1]));
     const oldVersions = versions.filter((version) => version !== VERSION);
     const isCurrentClaim = /\b(current|aligned|version|snapshot|published|release)\b/i.test(text);
     if (oldVersions.length > 0 && isCurrentClaim) {

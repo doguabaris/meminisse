@@ -7,7 +7,7 @@
 'use strict';
 
 const { DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_MAX_CHARS } = require('../constants');
-const { formatInjection } = require('../core/formatters');
+const { formatBudgetedText, formatInjection } = require('../core/formatters');
 const { parseOptions } = require('../core/options');
 const { readRecordsWithScope } = require('../memory/storage');
 const { splitList, toPositiveInt } = require('../core/utils');
@@ -27,14 +27,14 @@ function injectCommand(args) {
   const kinds = splitList(opts.kinds || 'preference,procedure,decision').map(normalizeKind);
   const kindSet = new Set(kinds);
   const priority = new Map(kinds.map((kind, index) => [kind, index]));
-  const records = readRecordsWithScope(scope)
+  const candidates = readRecordsWithScope(scope)
     .filter((item) => item.record.status === 'active')
     .filter((item) => kindSet.has(item.record.kind))
     .sort((a, b) => {
       const priorityDiff = priority.get(a.record.kind) - priority.get(b.record.kind);
       return priorityDiff || compareDateDesc(a.record, b.record);
-    })
-    .slice(0, limit);
+    });
+  const records = selectBalancedRecords(candidates, limit);
 
   if (opts.json) {
     console.log(JSON.stringify(records.map((item) => ({ scope: item.scope, ...item.record })), null, 2));
@@ -42,11 +42,43 @@ function injectCommand(args) {
   }
 
   if (records.length === 0) {
-    console.log('No injectable memories found.');
+    console.log(formatBudgetedText('No injectable memories found.', maxChars));
     return;
   }
 
   console.log(formatInjection(records, { maxChars }));
+}
+
+/**
+ * Shares startup slots across scopes and kinds in deterministic priority order.
+ *
+ * @param {{ scope: string, record: object }[]} candidates - Sorted active candidates.
+ * @param {number} limit - Maximum number of injected records.
+ * @returns {{ scope: string, record: object }[]} Balanced startup records.
+ */
+function selectBalancedRecords(candidates, limit) {
+  const groups = new Map();
+  for (const item of candidates) {
+    const key = `${item.scope}/${item.record.kind}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+
+  const selected = [];
+  let offset = 0;
+  while (selected.length < limit) {
+    let added = false;
+    for (const group of groups.values()) {
+      if (group[offset]) {
+        selected.push(group[offset]);
+        added = true;
+        if (selected.length === limit) return selected;
+      }
+    }
+    if (!added) break;
+    offset += 1;
+  }
+  return selected;
 }
 
 /**

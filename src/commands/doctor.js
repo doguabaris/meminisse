@@ -17,6 +17,7 @@ const {
   MARKETPLACE_PATH,
   hasIgnoreEntry,
   projectMemoryPath,
+  projectRootPath,
   readFileIfExists,
 } = require('../system/paths');
 const { globalMemoryPath } = require('../system/paths');
@@ -51,22 +52,28 @@ function doctorCommand(args) {
  */
 function runDoctorChecks() {
   const pluginSource = resolvePluginSource(path.dirname(fs.realpathSync(process.argv[1])));
-  const localManifest = readJsonSafe(path.join(pluginSource, '.codex-plugin', 'plugin.json'));
-  const packageJson = readJsonSafe(path.resolve(pluginSource, '..', '..', 'package.json'));
-  const installedManifest = readJsonSafe(
+  const localManifestRead = readJsonSafe(path.join(pluginSource, '.codex-plugin', 'plugin.json'));
+  const packageRead = readJsonSafe(path.join(pluginSource, 'package.json'));
+  const installedManifestRead = readJsonSafe(
     path.join(CODEX_PLUGIN_TARGET, '.codex-plugin', 'plugin.json'),
   );
-  const marketplace = readJsonSafe(MARKETPLACE_PATH);
+  const marketplaceRead = readJsonSafe(MARKETPLACE_PATH);
+  const localManifest = localManifestRead.value;
+  const packageJson = packageRead.value;
+  const installedManifest = installedManifestRead.value;
+  const marketplace = marketplaceRead.value;
   const marketplaceEntry =
     marketplace &&
     Array.isArray(marketplace.plugins) &&
-    marketplace.plugins.find((plugin) => plugin.name === 'meminisse');
+    marketplace.plugins.find((plugin) => plugin && plugin.name === 'meminisse');
   const checks = [];
 
   checks.push(okCheck('platform', platformLabel()));
   checks.push(okCheck('CLI version', VERSION));
   checks.push(
-    packageJson
+    packageRead.error
+      ? failCheck('package.json version', packageRead.error)
+      : packageJson
       ? statusCheck(
           packageJson.version === VERSION,
           'package.json version',
@@ -76,7 +83,9 @@ function runDoctorChecks() {
       : warnCheck('package.json version', 'package.json not found from this install location'),
   );
   checks.push(
-    localManifest
+    localManifestRead.error
+      ? failCheck('bundled plugin manifest', localManifestRead.error)
+      : localManifest
       ? statusCheck(
           localManifest.version === VERSION,
           'bundled plugin manifest version',
@@ -86,7 +95,9 @@ function runDoctorChecks() {
       : failCheck('bundled plugin manifest', path.join(pluginSource, '.codex-plugin', 'plugin.json')),
   );
   checks.push(
-    installedManifest
+    installedManifestRead.error
+      ? failCheck('installed plugin version', installedManifestRead.error)
+      : installedManifest
       ? statusCheck(
           installedManifest.version === VERSION,
           'installed plugin version',
@@ -97,7 +108,9 @@ function runDoctorChecks() {
   );
   checks.push(pathCheck('installed skill', path.join(CODEX_SKILL_TARGET, 'SKILL.md')));
   checks.push(
-    marketplaceEntry
+    marketplaceRead.error
+      ? failCheck('marketplace entry', marketplaceRead.error)
+      : marketplaceEntry
       ? statusCheck(
           marketplaceEntry.source && marketplaceEntry.source.path === './.codex/plugins/meminisse',
           'marketplace entry',
@@ -108,11 +121,12 @@ function runDoctorChecks() {
   );
   checks.push(pathCheck('project memory', projectMemoryPath()));
   checks.push(pathCheck('global memory parent', path.dirname(globalMemoryPath())));
+  const ignorePath = path.join(projectRootPath(), '.gitignore');
   checks.push(
     statusCheck(
-      hasIgnoreEntry(readFileIfExists(path.join(process.cwd(), '.gitignore')), '.meminisse/'),
+      hasIgnoreEntry(readFileIfExists(ignorePath), '.meminisse/'),
       '.meminisse gitignore entry',
-      path.join(process.cwd(), '.gitignore'),
+      ignorePath,
       '.meminisse/ missing',
     ),
   );
@@ -121,17 +135,24 @@ function runDoctorChecks() {
 }
 
 /**
- * Reads a JSON file when it exists.
+ * Reads JSON without aborting the remaining health checks on malformed files.
  *
  * @param {string} filePath - JSON file path.
- * @returns {object | undefined} Parsed JSON.
+ * @returns {{ value?: object, error?: string }} Parsed JSON or diagnostic.
  */
 function readJsonSafe(filePath) {
   if (!fs.existsSync(filePath)) {
-    return undefined;
+    return {};
   }
-
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('Expected a JSON object');
+    }
+    return { value };
+  } catch (error) {
+    return { error: `${filePath}: ${error.message}` };
+  }
 }
 
 /**

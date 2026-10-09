@@ -20,6 +20,10 @@ function parseOptions(args) {
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
+    if (arg === '--') {
+      rest.push(...args.slice(i + 1));
+      break;
+    }
     if (!arg.startsWith('--')) {
       rest.push(arg);
       continue;
@@ -27,7 +31,16 @@ function parseOptions(args) {
 
     const eq = arg.indexOf('=');
     if (eq !== -1) {
-      opts[arg.slice(2, eq)] = arg.slice(eq + 1);
+      const key = arg.slice(2, eq);
+      const value = arg.slice(eq + 1);
+      if (BOOLEAN_FLAGS.has(key)) {
+        if (value !== 'true' && value !== 'false') {
+          throw new Error(`Option --${key} must be true or false.`);
+        }
+        opts[key] = value === 'true';
+      } else {
+        opts[key] = value;
+      }
       continue;
     }
 

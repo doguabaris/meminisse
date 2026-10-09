@@ -1,4 +1,5 @@
 ## Meminisse
+
 ![Image](https://repository-images.githubusercontent.com/1208407736/ee74b993-19a7-4418-b1ca-55cbd42698bd)
 
 This tool helps you give Codex always-on persistent memory across
@@ -224,6 +225,12 @@ primary JSONL files. The key is not written to disk; the same environment
 variable must be available for later recall, list, status, compact, and
 review operations.
 
+Encrypted stores do not write `consolidated.md`; enabling encryption and
+running `compact` remove any existing plaintext summary. Their `index.json`
+contains counts and structural metadata, but no content-derived tags.
+Attachments and archives created before encryption was enabled are outside
+the primary JSONL encryption scope.
+
 ### Inspect and retire memory
 
 1. List active records without a search query.
@@ -438,19 +445,33 @@ CLI. It depends on `fs`, `path`, `os`, and `crypto` because it writes
 JSONL records, resolves local and global storage paths, and creates
 stable short IDs for memory records.
 
-Meminisse stores records in append-only JSONL files. New records include
-`schema_version` so future readers can handle format changes without
-guessing. Recall tokenizes the query and scores active records using
+Meminisse stores records in JSONL files. Reads and writes share a per-store
+process lock, and writes replace files atomically to prevent concurrent
+recall telemetry, lifecycle updates, and new memories from overwriting each
+other. Duplicate checks and replacement writes run under the same lock.
+Commands wait up to ten seconds for a busy store and then fail safely. If a
+process crashes while holding `.write.lock`, remove that file only after
+confirming no Meminisse process is using the store.
+
+New records include `schema_version` so future readers can handle format
+changes without guessing. Recall tokenizes the query and scores active records using
 weighted BM25-style lexical scoring across summary text, body text, tags,
 entities, and paths, then applies small confidence, status, kind, and
 recency boosts. Recall supports summary, full, and id-only output modes
 plus relevance thresholds and character budgets for token efficiency.
+Tokenization preserves Unicode letters and normalizes Turkish dotted and
+dotless I so Turkish and ASCII spellings can match.
 Recall also updates lightweight per-record telemetry fields so later
 status and review work can see which records are used. Encryption
 support uses AES-256-GCM with a key supplied by environment variable.
-Consolidation reads active records and writes a Markdown summary plus an
-`index.json` file. `compact --prune` can archive deleted and superseded
-records out of primary JSONL files.
+Consolidation reads active records and writes a Markdown summary for
+unencrypted stores plus an `index.json` file. `compact --prune` can archive
+deleted and superseded records out of primary JSONL files.
+
+Secret detection checks the memory body and all persisted text options,
+attachment titles, tags, and source paths, and deletion reasons before
+writing them. `--allow-secret` permits intentional non-sensitive test data;
+`--allow-secret=false` keeps the guard enabled.
 
 Memory lifecycle controls include duplicate detection, secret detection,
 listing, health checks, review reports, soft deletion, and `--supersedes`

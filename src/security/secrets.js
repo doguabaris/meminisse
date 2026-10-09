@@ -8,6 +8,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { TextDecoder } = require('util');
 
 const SECRET_PATTERNS = [
   { name: 'private key block', pattern: /-----BEGIN [A-Z0-9 ]*(?:PRIVATE|OPENSSH) KEY-----/ },
@@ -28,12 +29,12 @@ const SECRET_PATTERNS = [
   {
     name: 'dotenv credential assignment',
     pattern:
-      /\b(database_url|redis_url|mongo_uri|mongodb_uri|postgres_url|mysql_url|dsn)\b\s*[:=]\s*['"]?[^'"\s]{12,}/i,
+      /\b(database_url|redis_url|mongo_uri|mongodb_uri|postgres_url|mysql_url|dsn)\b['"]?\s*[:=]\s*['"]?[^'"\s]{12,}/i,
   },
   {
     name: 'secret assignment',
     pattern:
-      /\b(api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|token|password|passwd|pwd|private[_-]?key)\b\s*[:=]\s*['"]?[^'"\s]{12,}/i,
+      /\b(api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret|token|password|passwd|pwd|private[_-]?key)\b['"]?\s*[:=]\s*['"]?[^'"\s]{12,}/i,
   },
 ];
 
@@ -41,15 +42,44 @@ const SECRET_PATTERNS = [
  * Detects likely secrets before durable memory is written.
  *
  * @param {string} text - Memory body text.
+ * @param {{ pathValues?: boolean }} options - Whether text is a filesystem path.
  * @returns {string | undefined} Matched secret type.
  */
-function detectSecret(text) {
+function detectSecret(text, options = {}) {
   const patternMatch = SECRET_PATTERNS.find((pattern) => pattern.pattern.test(text));
   if (patternMatch) {
     return patternMatch.name;
   }
 
-  return detectHighEntropySecret(text);
+  // Slashes delimit path components; treating a whole path as a Base64 token
+  // incorrectly flags ordinary temporary directory names as high entropy.
+  const parts = options.pathValues ? String(text).split(/[\\/]/) : [text];
+  return parts.map(detectHighEntropySecret).find(Boolean);
+}
+
+/**
+ * Checks all text values that will be persisted, including nested metadata.
+ * Error messages identify the pattern without echoing sensitive values.
+ *
+ * @param {unknown} value - Text, array, or object to inspect.
+ * @param {boolean} allowSecret - Whether intentional test data is permitted.
+ * @param {{ pathValues?: boolean }} options - How to inspect text values.
+ * @returns {void}
+ */
+function assertNoSecrets(value, allowSecret = false, options = {}) {
+  if (allowSecret) return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoSecrets(item, false, options);
+  } else if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) assertNoSecrets(item, false, options);
+  } else if (typeof value === 'string') {
+    const secret = detectSecret(value, options);
+    if (secret) {
+      throw new Error(
+        `Possible ${secret} detected. Refusing to store it. Remove the secret or pass --allow-secret if this is intentionally non-sensitive.`,
+      );
+    }
+  }
 }
 
 /**
@@ -65,11 +95,39 @@ function detectAttachmentSecret(filePath, textExtensions) {
     return 'dotenv file';
   }
 
-  if (!textExtensions.has(path.extname(filePath).toLowerCase())) {
+  if (!textExtensions.has(path.extname(filePath).toLowerCase()) && !isTextFile(filePath)) {
     return undefined;
   }
 
   return detectSecret(fs.readFileSync(filePath, 'utf8'));
+}
+
+/**
+ * Recognizes UTF-8 text independently of its filename, including PEM, config,
+ * and extensionless credential files. Binary attachments remain supported.
+ *
+ * @param {string} filePath - Attachment source path.
+ * @returns {boolean} Whether a bounded prefix looks like UTF-8 text.
+ */
+function isTextFile(filePath) {
+  const descriptor = fs.openSync(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(8192);
+    const length = fs.readSync(descriptor, buffer, 0, buffer.length, 0);
+    const prefix = buffer.subarray(0, length);
+    if (prefix.includes(0)) return false;
+    for (const byte of prefix) {
+      if (byte < 32 && ![9, 10, 12, 13, 27].includes(byte)) return false;
+    }
+    try {
+      new TextDecoder('utf-8', { fatal: true }).decode(prefix, { stream: length === buffer.length });
+      return true;
+    } catch {
+      return false;
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
 }
 
 /**
@@ -139,6 +197,7 @@ function shannonEntropy(value) {
 }
 
 module.exports = {
+  assertNoSecrets,
   detectAttachmentSecret,
   detectSecret,
 };

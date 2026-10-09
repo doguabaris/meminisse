@@ -8,6 +8,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const { atomicWriteFile, withMemoryLock } = require('../system/file-safety');
+const { readEncryptionConfig } = require('../security/encryption');
 const { parseOptions } = require('../core/options');
 const {
   ensureDir,
@@ -44,67 +46,78 @@ function compactCommand(args) {
  * @param {'project' | 'global'} scope - Concrete memory scope.
  * @param {string} root - Memory root directory.
  * @param {boolean} prune - Whether to archive inactive records.
- * @returns {{ scope: string, pruned: number, archive_dir?: string }} Compaction stats.
+ * @returns {{ scope: string, pruned: number, archive_dir?: string, summary_skipped: boolean }} Compaction stats.
  */
 function compactOneScope(scope, root, prune) {
-  ensureDir(root);
-  if (scope === 'project') {
-    ensureProjectProfile();
-    ensureProjectIgnoreFiles();
-  }
-
-  const pruneStats = prune ? pruneInactiveRecords(root, scope) : { scope, pruned: 0 };
-  const records = readRecords(root).filter((record) => record.status === 'active');
-  const byKind = groupBy(records, (record) => record.kind);
-  const lines = [
-    '# Meminisse Consolidated Memory',
-    '',
-    `Updated: ${new Date().toISOString()}`,
-    `Scope: ${scope}`,
-    `Project: ${projectIdentity()}`,
-    '',
-  ];
-
-  for (const kind of ['decision', 'fact', 'procedure', 'preference', 'event', 'session', 'note']) {
-    const items = (byKind.get(kind) || []).sort(compareDateDesc).slice(0, 20);
-    if (items.length === 0) {
-      continue;
+  return withMemoryLock(root, () => {
+    ensureDir(root);
+    if (scope === 'project') {
+      ensureProjectProfile();
+      ensureProjectIgnoreFiles();
     }
 
-    lines.push(`## ${titleCase(kind)}s`);
-    for (const record of items) {
-      const tags =
-        record.tags && record.tags.length ? ` (${record.tags.slice(0, 4).join(', ')})` : '';
-      lines.push(`- ${record.summary}${tags}`);
+    const pruneStats = prune ? pruneInactiveRecords(root, scope) : { scope, pruned: 0 };
+    const records = readRecords(root).filter((record) => record.status === 'active');
+    const byKind = groupBy(records, (record) => record.kind);
+    const lines = [
+      '# Meminisse Consolidated Memory',
+      '',
+      `Updated: ${new Date().toISOString()}`,
+      `Scope: ${scope}`,
+      `Project: ${projectIdentity()}`,
+      '',
+    ];
+
+    for (const kind of ['decision', 'fact', 'procedure', 'preference', 'event', 'session', 'note']) {
+      const items = (byKind.get(kind) || []).sort(compareDateDesc).slice(0, 20);
+      if (items.length === 0) {
+        continue;
+      }
+
+      lines.push(`## ${titleCase(kind)}s`);
+      for (const record of items) {
+        const tags =
+          record.tags && record.tags.length ? ` (${record.tags.slice(0, 4).join(', ')})` : '';
+        lines.push(`- ${record.summary}${tags}`);
+      }
+      lines.push('');
     }
-    lines.push('');
-  }
 
-  const tagCounts = countTags(records);
-  if (tagCounts.length > 0) {
-    lines.push('## Retrieval Cues');
-    lines.push(
-      tagCounts
-        .slice(0, 30)
-        .map(([tag, count]) => `${tag}:${count}`)
-        .join(', '),
-    );
-    lines.push('');
-  }
+    const tagCounts = countTags(records);
+    if (tagCounts.length > 0) {
+      lines.push('## Retrieval Cues');
+      lines.push(
+        tagCounts
+          .slice(0, 30)
+          .map(([tag, count]) => `${tag}:${count}`)
+          .join(', '),
+      );
+      lines.push('');
+    }
 
-  fs.writeFileSync(path.join(root, 'consolidated.md'), `${lines.join('\n')}\n`, 'utf8');
-  refreshIndex(root);
-  return pruneStats;
+    const summaryPath = path.join(root, 'consolidated.md');
+    const summarySkipped = Boolean(readEncryptionConfig(root));
+    if (summarySkipped) {
+      fs.rmSync(summaryPath, { force: true });
+    } else {
+      atomicWriteFile(summaryPath, `${lines.join('\n')}\n`);
+    }
+    refreshIndex(root);
+    return { ...pruneStats, summary_skipped: summarySkipped };
+  });
 }
 
 /**
- * Prints non-empty prune results.
+ * Prints non-empty prune results and encrypted-summary notices.
  *
- * @param {{ scope: string, pruned: number, archive_dir?: string }[]} stats - Prune stats.
+ * @param {{ scope: string, pruned: number, archive_dir?: string, summary_skipped: boolean }[]} stats - Compaction stats.
  * @returns {void}
  */
 function printPruneStats(stats) {
   for (const item of stats) {
+    if (item.summary_skipped) {
+      console.log(`Skipped plaintext summary for encrypted ${item.scope} memories.`);
+    }
     if (item.pruned > 0) {
       console.log(`Pruned ${item.pruned} inactive ${item.scope} records to ${item.archive_dir}.`);
     }

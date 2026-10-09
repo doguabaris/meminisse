@@ -25,12 +25,33 @@ const CODEX_SKILL_TARGET = homePath('.codex', 'skills', 'meminisse');
 const MARKETPLACE_PATH = homePath('.agents', 'plugins', 'marketplace.json');
 
 /**
+ * Finds the closest initialized workspace or Git root without crossing a nested
+ * repository boundary. Uninitialized non-Git directories retain cwd behavior.
+ *
+ * @param {string} [start=process.cwd()] - Directory from which to find the project.
+ * @returns {string} Absolute project root path.
+ */
+function projectRootPath(start = process.cwd()) {
+  const fallback = path.resolve(start);
+  let directory = fallback;
+  while (true) {
+    if (fs.existsSync(path.join(directory, PROJECT_DIR, MEMORY_DIR)) ||
+        fs.existsSync(path.join(directory, '.git'))) {
+      return directory;
+    }
+    const parent = path.dirname(directory);
+    if (parent === directory) return fallback;
+    directory = parent;
+  }
+}
+
+/**
  * Returns the current workspace memory path.
  *
  * @returns {string} Project memory path.
  */
 function projectMemoryPath() {
-  return path.join(process.cwd(), PROJECT_DIR, MEMORY_DIR);
+  return path.join(projectRootPath(), PROJECT_DIR, MEMORY_DIR);
 }
 
 /**
@@ -48,7 +69,7 @@ function globalMemoryPath() {
  * @returns {string} Attachment root path.
  */
 function projectAttachmentsPath() {
-  return path.join(process.cwd(), PROJECT_DIR, ATTACHMENTS_DIR);
+  return path.join(projectRootPath(), PROJECT_DIR, ATTACHMENTS_DIR);
 }
 
 /**
@@ -89,7 +110,8 @@ function forEachConcreteScope(scope, callback) {
  * @returns {string} Project identity.
  */
 function projectIdentity() {
-  return path.basename(process.cwd()) || process.cwd();
+  const root = projectRootPath();
+  return path.basename(root) || root;
 }
 
 /**
@@ -127,7 +149,7 @@ function ensureProjectProfile() {
 
   const profile = {
     project: projectIdentity(),
-    root: process.cwd(),
+    root: projectRootPath(),
     created_at: new Date().toISOString(),
   };
   fs.writeFileSync(filePath, `${JSON.stringify(profile, null, 2)}\n`, 'utf8');
@@ -139,10 +161,11 @@ function ensureProjectProfile() {
  * @returns {void}
  */
 function ensureProjectIgnoreFiles() {
-  ensureIgnoreEntry(path.join(process.cwd(), '.gitignore'), PROJECT_IGNORE_ENTRY, true);
-  ensureIgnoreEntry(path.join(process.cwd(), '.npmignore'), PROJECT_IGNORE_ENTRY, false);
-  ensureIgnoreEntry(path.join(process.cwd(), '.dockerignore'), PROJECT_DIR, false);
-  ensureIgnoreEntry(path.join(process.cwd(), '.remarkignore'), PROJECT_IGNORE_ENTRY, false);
+  const root = projectRootPath();
+  ensureIgnoreEntry(path.join(root, '.gitignore'), PROJECT_IGNORE_ENTRY, true);
+  ensureIgnoreEntry(path.join(root, '.npmignore'), PROJECT_IGNORE_ENTRY, false);
+  ensureIgnoreEntry(path.join(root, '.dockerignore'), PROJECT_DIR, false);
+  ensureIgnoreEntry(path.join(root, '.remarkignore'), PROJECT_IGNORE_ENTRY, false);
 }
 
 /**
@@ -214,6 +237,19 @@ function relativeToCwd(filePath) {
 }
 
 /**
+ * Stores attachment references relative to their project rather than invocation
+ * directory, preserving the same references when commands run in subdirectories.
+ *
+ * @param {string} filePath - Absolute or relative path.
+ * @returns {string} Project-relative path, or absolute path outside the project.
+ */
+function relativeToProjectRoot(filePath) {
+  const absolute = path.resolve(filePath);
+  const relative = path.relative(projectRootPath(), absolute);
+  return relative === '..' || relative.startsWith(`..${path.sep}`) ? absolute : relative;
+}
+
+/**
  * Resolves a memory path to a filesystem path.
  *
  * @param {string} recordPath - Path stored in memory.
@@ -221,7 +257,7 @@ function relativeToCwd(filePath) {
  */
 function resolveMemoryPath(recordPath) {
   const expanded = expandHome(recordPath);
-  return path.isAbsolute(expanded) ? expanded : path.join(process.cwd(), expanded);
+  return path.isAbsolute(expanded) ? expanded : path.join(projectRootPath(), expanded);
 }
 
 /**
@@ -252,14 +288,17 @@ function createAttachmentFolder(title, createdAt) {
   const base = path.join(projectAttachmentsPath(), dateParts[0], dateParts[1], slugify(title));
   let candidate = base;
   let suffix = 2;
-
-  while (fs.existsSync(candidate)) {
-    candidate = `${base}-${suffix}`;
-    suffix += 1;
+  ensureDir(path.dirname(base));
+  while (true) {
+    try {
+      fs.mkdirSync(candidate, { mode: 0o700 });
+      return candidate;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
   }
-
-  ensureDir(candidate);
-  return candidate;
 }
 
 /**
@@ -333,8 +372,10 @@ module.exports = {
   projectAttachmentsPath,
   projectIdentity,
   projectMemoryPath,
+  projectRootPath,
   readFileIfExists,
   relativeToCwd,
+  relativeToProjectRoot,
   resolveMemoryPath,
   scopePath,
   shouldCheckPath,

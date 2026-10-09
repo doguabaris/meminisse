@@ -9,16 +9,25 @@
 const fs = require('fs');
 const path = require('path');
 const {
+  atomicReplaceFiles,
+  atomicWriteFile,
+  withMemoryLock,
+  withMemoryReadLock,
+} = require('../system/file-safety');
+const {
   DEFAULT_ENCRYPTION_KEY_ENV,
+  ENCRYPTION_CONFIG_FILE,
   MEMORY_SCHEMA_VERSION,
 } = require('../constants');
 const {
+  addEncryptionKeyCheck,
   createEncryptionConfig,
   parseStoredRecord: parseEncryptedOrPlainRecord,
   readEncryptionConfig,
   requireEncryptionKey,
   serializeStoredRecord,
-  writeEncryptionConfig,
+  verifyEncryptionKey,
+  withEncryptionSession,
 } = require('../security/encryption');
 const {
   ensureDir,
@@ -50,6 +59,30 @@ const {
 } = require('../core/validators');
 
 /**
+ * Locks a storage mutation and shares derived keys until it completes.
+ *
+ * @template T
+ * @param {string} root - Memory root.
+ * @param {() => T} operation - Synchronous operation.
+ * @returns {T} Operation result.
+ */
+function withStorageLock(root, operation) {
+  return withMemoryLock(root, () => withEncryptionSession(operation));
+}
+
+/**
+ * Reads a consistent snapshot without requiring write access to the store.
+ *
+ * @template T
+ * @param {string} root - Memory root.
+ * @param {() => T} operation - Synchronous read operation.
+ * @returns {T} Operation result.
+ */
+function withStorageReadLock(root, operation) {
+  return withMemoryReadLock(root, () => withEncryptionSession(operation));
+}
+
+/**
  * Reads memory records and annotates each record with its source scope.
  *
  * @param {'project' | 'global' | 'all'} scope - Memory scope to read.
@@ -70,31 +103,35 @@ function readRecordsWithScope(scope) {
  * @returns {object[]} Parsed memory records.
  */
 function readRecords(root) {
-  const records = [];
-  for (const filename of uniqueMemoryFiles()) {
-    const filePath = path.join(root, filename);
-    if (!fs.existsSync(filePath)) {
-      continue;
-    }
-
-    for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) {
+  if (!fs.existsSync(root)) return [];
+  return withStorageReadLock(root, () => {
+    verifyEncryptionKey(root);
+    const records = [];
+    for (const filename of uniqueMemoryFiles()) {
+      const filePath = path.join(root, filename);
+      if (!fs.existsSync(filePath)) {
         continue;
       }
 
-      try {
-        records.push(parseStoredRecord(root, trimmed));
-      } catch (error) {
-        if (trimmed.includes('"encrypted":true')) {
-          throw error;
+      for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
         }
-        records.push(parseErrorRecord(filePath, trimmed));
+
+        try {
+          records.push(parseStoredRecord(root, trimmed));
+        } catch (error) {
+          if (error.encryptedMemory || /"encrypted"\s*:\s*true/.test(trimmed)) {
+            throw error;
+          }
+          records.push(parseErrorRecord(filePath, trimmed));
+        }
       }
     }
-  }
 
-  return records;
+    return records;
+  });
 }
 
 /**
@@ -173,9 +210,15 @@ function normalizeMemoryRecord(record) {
  * @returns {void}
  */
 function writeRecord(root, filename, record) {
-  ensureDir(root);
-  const filePath = path.join(root, filename);
-  fs.appendFileSync(filePath, `${serializeStoredRecord(root, record)}\n`, 'utf8');
+  return withStorageLock(root, () => {
+    ensureDir(root);
+    verifyEncryptionKey(root);
+    const filePath = path.join(root, filename);
+    const line = serializeStoredRecord(root, record);
+    const previous = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+    const separator = previous && !previous.endsWith('\n') ? '\n' : '';
+    atomicWriteFile(filePath, `${previous}${separator}${line}\n`);
+  });
 }
 
 /**
@@ -292,31 +335,41 @@ function markRecalled(root, ids, now) {
  * @returns {{ changed: number }} Rewrite stats.
  */
 function rewriteMatchingRecords(root, updater) {
-  let changed = 0;
-  for (const filename of uniqueMemoryFiles()) {
-    const filePath = path.join(root, filename);
-    if (!fs.existsSync(filePath)) {
-      continue;
-    }
+  return withStorageLock(root, () => {
+    verifyEncryptionKey(root);
+    let changed = 0;
+    for (const filename of uniqueMemoryFiles()) {
+      const filePath = path.join(root, filename);
+      if (!fs.existsSync(filePath)) {
+        continue;
+      }
 
-    const nextLines = [];
-    for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
-      try {
-        const record = parseStoredRecord(root, line);
+      const nextLines = [];
+      let fileChanged = false;
+      for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+        let record;
+        try {
+          record = parseStoredRecord(root, line);
+        } catch (error) {
+          if (error.encryptedMemory || /"encrypted"\s*:\s*true/.test(line)) throw error;
+          nextLines.push(line);
+          continue;
+        }
         const result = updater(record);
         if (result.changed) {
           changed += 1;
+          fileChanged = true;
         }
-        nextLines.push(serializeStoredRecord(root, result.record));
-      } catch {
-        nextLines.push(line);
+        nextLines.push(result.changed ? serializeStoredRecord(root, result.record) : line);
+      }
+
+      if (fileChanged) {
+        atomicWriteFile(filePath, nextLines.length ? `${nextLines.join('\n')}\n` : '');
       }
     }
 
-    fs.writeFileSync(filePath, nextLines.length ? `${nextLines.join('\n')}\n` : '', 'utf8');
-  }
-
-  return { changed };
+    return { changed };
+  });
 }
 
 /**
@@ -330,7 +383,16 @@ function updateRecallTelemetry(items) {
   const now = new Date().toISOString();
 
   for (const [scope, scopedItems] of byScope.entries()) {
-    const updated = markRecalled(scopePath(scope), scopedItems.map((item) => item.record.id), now);
+    let updated;
+    try {
+      updated = markRecalled(scopePath(scope), scopedItems.map((item) => item.record.id), now);
+    } catch (error) {
+      // Recall remains useful for read-only stores; telemetry is best-effort.
+      // Other failures (bad keys, malformed encrypted rows, lock timeouts) must
+      // still reach the caller instead of being silently hidden.
+      if (!isReadOnlyStorageError(error)) throw error;
+      continue;
+    }
     for (const item of scopedItems) {
       const record = updated.get(item.record.id);
       if (record) {
@@ -342,23 +404,51 @@ function updateRecallTelemetry(items) {
 }
 
 /**
+ * Identifies filesystem errors caused by a deliberately read-only memory root.
+ *
+ * @param {Error & { code?: string }} error - Error to inspect.
+ * @returns {boolean} Whether the error is a read-only permission failure.
+ */
+function isReadOnlyStorageError(error) {
+  return Boolean(
+    error &&
+      (['EACCES', 'EPERM', 'EROFS'].includes(error.code) ||
+        /permission denied|read-only file system/i.test(error.message || '')),
+  );
+}
+
+/**
  * Rebuilds the lightweight index for a memory root.
  *
  * @param {string} root - Memory root directory.
  * @returns {void}
  */
 function refreshIndex(root) {
-  ensureDir(root);
-  const records = readRecords(root);
+  return withStorageLock(root, () => {
+    ensureDir(root);
+    const records = readRecords(root);
+    const index = buildMemoryIndex(records, Boolean(readEncryptionConfig(root)));
+    atomicWriteFile(path.join(root, 'index.json'), `${JSON.stringify(index, null, 2)}\n`);
+  });
+}
+
+/**
+ * Builds index metadata without writing intermediate migration state.
+ *
+ * @param {object[]} records - Normalized memory records.
+ * @param {boolean} encrypted - Whether content-derived tags must be omitted.
+ * @returns {object} Memory index.
+ */
+function buildMemoryIndex(records, encrypted) {
   const index = {
     schema_version: MEMORY_SCHEMA_VERSION,
     updated_at: new Date().toISOString(),
     project: projectIdentity(),
     counts: {},
     schema_versions: {},
-    tags: Object.fromEntries(countTags(records)),
+    tags: encrypted ? {} : Object.fromEntries(countTags(records)),
     records: records.length,
-    encrypted: Boolean(readEncryptionConfig(root)),
+    encrypted,
   };
 
   for (const record of records) {
@@ -367,7 +457,7 @@ function refreshIndex(root) {
       (index.schema_versions[record.schema_version] || 0) + 1;
   }
 
-  fs.writeFileSync(path.join(root, 'index.json'), `${JSON.stringify(index, null, 2)}\n`, 'utf8');
+  return index;
 }
 
 /**
@@ -396,38 +486,63 @@ function countTags(records) {
  * @returns {{ scope: string, enabled: boolean, encrypted_records: number, key_env: string }} Enable stats.
  */
 function enableEncryption(root, scope, keyEnv = DEFAULT_ENCRYPTION_KEY_ENV) {
-  ensureDir(root);
-  if (scope === 'project') {
-    ensureProjectProfile();
-    ensureProjectIgnoreFiles();
-  }
+  return withStorageLock(root, () => {
+    ensureDir(root);
+    const existing = readEncryptionConfig(root);
+    if (existing && existing.key_env !== keyEnv) {
+      throw new Error(
+        `Changing the encryption key environment is not supported. This store uses ${existing.key_env}; its configuration and records have not been changed.`,
+      );
+    }
+    requireEncryptionKey(keyEnv);
+    verifyEncryptionKey(root, existing);
 
-  requireEncryptionKey(keyEnv);
-  const existing = readEncryptionConfig(root);
-  const config = existing && existing.enabled ? existing : createEncryptionConfig(keyEnv);
-  config.key_env = keyEnv;
-  config.enabled = true;
-  config.updated_at = new Date().toISOString();
-  writeEncryptionConfig(root, config);
+    const files = [];
+    const records = [];
+    // Validate the complete input before publishing any migration output.
+    for (const filename of uniqueMemoryFiles()) {
+      const filePath = path.join(root, filename);
+      if (!fs.existsSync(filePath)) {
+        continue;
+      }
 
-  let encryptedRecords = 0;
-  for (const filename of uniqueMemoryFiles()) {
-    const filePath = path.join(root, filename);
-    if (!fs.existsSync(filePath)) {
-      continue;
+      const fileRecords = [];
+      for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+        const record = parseStoredRecord(root, line);
+        fileRecords.push(record);
+        records.push(record);
+      }
+      files.push({ filePath, records: fileRecords });
     }
 
-    const nextLines = [];
-    for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
-      const record = parseStoredRecord(root, line);
-      nextLines.push(serializeStoredRecord(root, record));
-      encryptedRecords += 1;
-    }
-    fs.writeFileSync(filePath, nextLines.length ? `${nextLines.join('\n')}\n` : '', 'utf8');
-  }
+    const config = addEncryptionKeyCheck({
+      ...(existing || createEncryptionConfig(keyEnv)),
+      updated_at: new Date().toISOString(),
+    });
+    const changes = files.map((file) => {
+      const lines = file.records.map((record) => serializeStoredRecord(root, record, config));
+      return { filePath: file.filePath, content: lines.length ? `${lines.join('\n')}\n` : '' };
+    });
+    changes.push(
+      {
+        filePath: path.join(root, ENCRYPTION_CONFIG_FILE),
+        content: `${JSON.stringify(config, null, 2)}\n`,
+      },
+      {
+        filePath: path.join(root, 'index.json'),
+        content: `${JSON.stringify(buildMemoryIndex(records, true), null, 2)}\n`,
+      },
+      { filePath: path.join(root, 'consolidated.md'), content: null },
+    );
 
-  refreshIndex(root);
-  return { scope, enabled: true, encrypted_records: encryptedRecords, key_env: keyEnv };
+    if (scope === 'project') {
+      ensureProjectProfile();
+      ensureProjectIgnoreFiles();
+    }
+
+    atomicReplaceFiles(changes);
+    return { scope, enabled: true, encrypted_records: records.length, key_env: keyEnv };
+  });
 }
 
 /**
@@ -438,13 +553,15 @@ function enableEncryption(root, scope, keyEnv = DEFAULT_ENCRYPTION_KEY_ENV) {
  * @returns {{ scope: string, enabled: boolean, key_env?: string, root: string }} Status object.
  */
 function encryptionStatus(root, scope) {
-  const config = readEncryptionConfig(root);
-  return {
-    scope,
-    enabled: Boolean(config && config.enabled),
-    ...(config && config.key_env ? { key_env: config.key_env } : {}),
-    root,
-  };
+  return withStorageReadLock(root, () => {
+    const config = readEncryptionConfig(root);
+    return {
+      scope,
+      enabled: Boolean(config && config.enabled),
+      ...(config && config.key_env ? { key_env: config.key_env } : {}),
+      root,
+    };
+  });
 }
 
 /**
@@ -476,41 +593,44 @@ function encryptionStatusForScope(scope) {
  * @returns {{ scope: string, pruned: number, archive_dir?: string }} Prune stats.
  */
 function pruneInactiveRecords(root, scope) {
-  const archiveDir = path.join(root, 'archive', new Date().toISOString().replace(/[:.]/g, '-'));
-  let pruned = 0;
+  return withStorageLock(root, () => {
+    verifyEncryptionKey(root);
+    const archiveDir = path.join(root, 'archive', new Date().toISOString().replace(/[:.]/g, '-'));
+    let pruned = 0;
 
-  for (const filename of uniqueMemoryFiles()) {
-    const filePath = path.join(root, filename);
-    if (!fs.existsSync(filePath)) {
-      continue;
-    }
-
-    const keptLines = [];
-    const archivedLines = [];
-    for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
-      try {
-        const record = parseStoredRecord(root, line);
-        if (record.status === 'deleted' || record.status === 'superseded') {
-          archivedLines.push(serializeStoredRecord(root, record));
-          pruned += 1;
-          continue;
-        }
-      } catch {
-        keptLines.push(line);
+    for (const filename of uniqueMemoryFiles()) {
+      const filePath = path.join(root, filename);
+      if (!fs.existsSync(filePath)) {
         continue;
       }
 
-      keptLines.push(line);
+      const keptLines = [];
+      const archivedLines = [];
+      for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/).filter(Boolean)) {
+        try {
+          const record = parseStoredRecord(root, line);
+          if (record.status === 'deleted' || record.status === 'superseded') {
+            archivedLines.push(serializeStoredRecord(root, record));
+            pruned += 1;
+            continue;
+          }
+        } catch {
+          keptLines.push(line);
+          continue;
+        }
+
+        keptLines.push(line);
+      }
+
+      if (archivedLines.length > 0) {
+        ensureDir(archiveDir);
+        atomicWriteFile(path.join(archiveDir, filename), `${archivedLines.join('\n')}\n`);
+        atomicWriteFile(filePath, keptLines.length ? `${keptLines.join('\n')}\n` : '');
+      }
     }
 
-    if (archivedLines.length > 0) {
-      ensureDir(archiveDir);
-      fs.writeFileSync(path.join(archiveDir, filename), `${archivedLines.join('\n')}\n`, 'utf8');
-      fs.writeFileSync(filePath, keptLines.length ? `${keptLines.join('\n')}\n` : '', 'utf8');
-    }
-  }
-
-  return pruned > 0 ? { scope, pruned, archive_dir: archiveDir } : { scope, pruned };
+    return pruned > 0 ? { scope, pruned, archive_dir: archiveDir } : { scope, pruned };
+  });
 }
 
 /**

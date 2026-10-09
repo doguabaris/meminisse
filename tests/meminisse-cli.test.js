@@ -12,11 +12,12 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { setTimeout: delay } = require('node:timers/promises');
 
 const repoRoot = process.cwd();
 const packageVersion = JSON.parse(
@@ -98,6 +99,46 @@ function runCli(args, options = {}) {
  */
 function runCliRaw(args, options = {}) {
   return runNodeRaw(cliPath, args, options);
+}
+
+/**
+ * Starts an isolated worker and collects its output until it closes.
+ *
+ * @param {string} code - Worker JavaScript.
+ * @param {string[]} args - Worker arguments.
+ * @param {string} cwd - Isolated workspace.
+ * @returns {{ child: import('node:child_process').ChildProcess, output: () => string, done: Promise<void> }} Worker handle.
+ */
+function startWorker(code, args, cwd) {
+  const child = spawn(process.execPath, ['-e', code, ...args], { cwd });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (data) => { stdout += data; });
+  child.stderr.on('data', (data) => { stderr += data; });
+  const done = new Promise((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (status) => {
+      if (status === 0) resolve();
+      else reject(new Error(`Worker exited ${status}: ${stderr}`));
+    });
+  });
+  // Callers await the result after releasing any test barrier.
+  done.catch(() => {});
+  return { child, output: () => stdout, done };
+}
+
+/**
+ * Waits for an explicit worker checkpoint with a bounded timeout.
+ *
+ * @param {() => boolean} ready - Checkpoint condition.
+ * @returns {Promise<void>} Resolves when the checkpoint is reached.
+ */
+async function waitForCheckpoint(ready) {
+  const deadline = Date.now() + 5000;
+  while (!ready()) {
+    assert.ok(Date.now() < deadline, 'Worker did not reach its checkpoint');
+    await delay(10);
+  }
 }
 
 test('CLI initializes, stores, recalls, consolidates, and reports memory', () => {
@@ -780,6 +821,237 @@ test('attach copies a file into project attachments and remembers its paths', ()
     assert.ok(attachedRecord.paths.some((recordPath) => recordPath.endsWith('/note.md')));
     assert.ok(attachedRecord.paths.some((recordPath) => recordPath.endsWith('/original.md')));
   } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('encryption removes plaintext summaries and content-derived index tags in both scopes', () => {
+  const workspace = makeTempDir('encrypted-summary-workspace-');
+  const home = makeTempDir('encrypted-summary-home-');
+  const env = { MEMINISSE_ENCRYPTION_KEY: 'correct-horse-battery-staple' };
+  const options = { cwd: workspace, home, env };
+  const roots = [
+    path.join(workspace, '.meminisse', 'memory'),
+    path.join(home, '.codex', 'memories', 'meminisse', 'memory'),
+  ];
+
+  try {
+    runCli(['remember', '--kind', 'fact', '--tags', 'ConfidentialMarker', 'ConfidentialMarker project strategy.'], options);
+    runCli(['remember', '--kind', 'preference', '--tags', 'ConfidentialMarker', 'ConfidentialMarker global preference.'], options);
+    runCli(['compact', '--scope', 'all'], options);
+    for (const root of roots) {
+      assert.match(fs.readFileSync(path.join(root, 'consolidated.md'), 'utf8'), /ConfidentialMarker/);
+    }
+
+    runCli(['encryption', 'enable', '--scope', 'all'], options);
+    for (const root of roots) {
+      assert.equal(fs.existsSync(path.join(root, 'consolidated.md')), false);
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'index.json'), 'utf8')).tags, {});
+      // Simulate a leftover summary from an older version.
+      fs.writeFileSync(path.join(root, 'consolidated.md'), 'ConfidentialMarker');
+    }
+
+    const compacted = runCli(['compact', '--scope', 'all', '--prune'], options);
+    assert.match(compacted.stdout, /Skipped plaintext summary for encrypted project/);
+    assert.match(compacted.stdout, /Skipped plaintext summary for encrypted global/);
+    for (const root of roots) {
+      assert.equal(fs.existsSync(path.join(root, 'consolidated.md')), false);
+      for (const filename of fs.readdirSync(root)) {
+        assert.doesNotMatch(fs.readFileSync(path.join(root, filename), 'utf8'), /ConfidentialMarker/i);
+      }
+    }
+    assert.equal(JSON.parse(runCli(['recall', '--json', 'ConfidentialMarker'], options).stdout).length, 2);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('remember checks every persisted text option before creating memory files', () => {
+  const workspace = makeTempDir('metadata-secret-workspace-');
+  const home = makeTempDir('metadata-secret-home-');
+  const options = { cwd: workspace, home };
+  const fakeSecret = 'password=abcdefghijklmnop';
+
+  try {
+    for (const option of ['summary', 'tags', 'entities', 'paths', 'source', 'event', 'supersedes']) {
+      const result = runCliRaw(['remember', '--kind', 'fact', `--${option}`, fakeSecret, 'Safe body.'], options);
+      assert.notEqual(result.status, 0, option);
+      assert.match(result.stderr, /Possible secret assignment detected/);
+      assert.doesNotMatch(result.stderr, /abcdefghijklmnop/);
+      assert.equal(fs.existsSync(path.join(workspace, '.meminisse')), false);
+    }
+    const denied = runCliRaw(['remember', '--summary', fakeSecret, '--allow-secret=false', 'Safe body.'], options);
+    assert.notEqual(denied.status, 0);
+    const ordinaryPath = '/var/folders/d3/c8yxrd_n4cl94tmy1n1lpn740000gn/T/meminisse-attach-workspace--jnT8Uh/source-note.md';
+    runCli(['remember', '--paths', ordinaryPath, 'Safe path fixture.'], options);
+    runCli(['remember', '--summary', fakeSecret, '--allow-secret', 'Safe test fixture.'], options);
+    const stored = JSON.parse(runCli(['list', '--scope', 'project', '--json'], options).stdout);
+    assert.ok(stored.some((record) => record.summary === fakeSecret));
+    assert.ok(stored.some((record) => record.paths.includes(ordinaryPath)));
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('attachments reject secrets in titles, tags, and source paths before copying or moving', () => {
+  const workspace = makeTempDir('attachment-secret-workspace-');
+  const home = makeTempDir('attachment-secret-home-');
+  const options = { cwd: workspace, home };
+  const source = path.join(workspace, 'safe.txt');
+  const secretSource = path.join(workspace, 'password=abcdefghijklmnop.txt');
+
+  try {
+    fs.writeFileSync(source, 'Safe attachment.');
+    fs.writeFileSync(secretSource, 'Safe attachment.');
+    for (const args of [
+      [source, '--title', 'password=abcdefghijklmnop'],
+      [source, '--tags', 'password=abcdefghijklmnop'],
+      [secretSource, '--title', 'Safe title'],
+    ]) {
+      const result = runCliRaw(['attach', ...args, '--move'], options);
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /Possible secret assignment detected/);
+      assert.equal(fs.existsSync(path.join(workspace, '.meminisse')), false);
+      assert.ok(fs.existsSync(source));
+      assert.ok(fs.existsSync(secretSource));
+    }
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('forget rejects secrets in the deletion reason without changing the record', () => {
+  const workspace = makeTempDir('forget-secret-workspace-');
+  const home = makeTempDir('forget-secret-home-');
+  const options = { cwd: workspace, home };
+
+  try {
+    runCli(['remember', 'Safe memory.'], options);
+    const record = JSON.parse(runCli(['list', '--scope', 'project', '--json'], options).stdout)[0];
+    const result = runCliRaw(['forget', '--scope', 'project', '--reason', 'password=abcdefghijklmnop', record.id], options);
+    assert.notEqual(result.status, 0);
+    assert.equal(JSON.parse(runCli(['list', '--scope', 'project', '--json'], options).stdout)[0].status, 'active');
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('recall preserves Turkish words and matches case and ASCII spellings', () => {
+  const workspace = makeTempDir('turkish-workspace-');
+  const home = makeTempDir('turkish-home-');
+  const options = { cwd: workspace, home };
+  const { tokenize } = require('../src/memory/recall');
+
+  try {
+    assert.deepEqual(tokenize('iş akışı bağımlılık'), ['akisi', 'bagimlilik']);
+    assert.deepEqual(tokenize('IŞIK İŞLEM ışık işlem'), ['isik', 'islem', 'isik', 'islem']);
+    assert.deepEqual(tokenize('память 日本語 src/memory/storage.js'), ['память', '日本語', 'src/memory/storage.js']);
+    runCli(['remember', '--kind', 'procedure', 'İş akışı bağımlılık yönetimi için npm kullanır.'], options);
+    for (const query of ['akışı', 'bağımlılık', 'AKIŞI BAĞIMLILIK', 'akisi bagimlilik']) {
+      const records = JSON.parse(runCli(['recall', '--scope', 'project', '--json', query], options).stdout);
+      assert.equal(records.length, 1, query);
+      assert.match(records[0].body, /İş akışı bağımlılık/);
+    }
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a concurrent remember survives recall telemetry rewriting an older file snapshot', async () => {
+  const workspace = makeTempDir('concurrent-recall-workspace-');
+  const home = makeTempDir('concurrent-recall-home-');
+  const options = { cwd: workspace, home };
+  const releasePath = path.join(workspace, 'release');
+  const workers = [];
+
+  try {
+    runCli(['remember', '--kind', 'fact', 'ConcurrentMarker original memory.'], options);
+    const reader = startWorker(`
+      const fs = require('fs');
+      const isolatedHome = process.argv[1];
+      require('os').homedir = () => isolatedHome;
+      const release = process.argv[2];
+      const read = fs.readFileSync;
+      let reads = 0;
+      fs.readFileSync = function(file, ...args) {
+        const content = read.call(this, file, ...args);
+        if (String(file).endsWith('facts.jsonl') && ++reads === 2) {
+          process.stdout.write('snapshot\\n');
+          const deadline = Date.now() + 5000;
+          while (!fs.existsSync(release)) {
+            if (Date.now() > deadline) throw new Error('Barrier timed out');
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+          }
+        }
+        return content;
+      };
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, 'recall', '--scope', 'project', 'ConcurrentMarker'];
+      require(${JSON.stringify(cliPath)});
+    `, [home, releasePath], workspace);
+    workers.push(reader);
+    await waitForCheckpoint(() => reader.output().includes('snapshot'));
+
+    const writer = startWorker(`
+      const fs = require('fs');
+      const isolatedHome = process.argv[1];
+      require('os').homedir = () => isolatedHome;
+      const open = fs.openSync;
+      fs.openSync = function(file, flags, ...args) {
+        if (String(file).endsWith('.write.lock') && flags === 'wx') process.stdout.write('contending\\n');
+        return open.call(this, file, flags, ...args);
+      };
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, 'remember', '--kind', 'fact', 'ConcurrentMarker new memory.'];
+      require(${JSON.stringify(cliPath)});
+    `, [home], workspace);
+    workers.push(writer);
+    await waitForCheckpoint(() => writer.output().includes('contending'));
+    fs.writeFileSync(releasePath, 'release');
+    await Promise.all(workers.map((worker) => worker.done));
+
+    const records = JSON.parse(runCli(['list', '--scope', 'project', '--json'], options).stdout);
+    assert.equal(records.length, 2);
+    assert.equal(records.find((record) => record.body.includes('original')).recall_count, 1);
+    assert.ok(records.some((record) => record.body.includes('new memory')));
+    assert.equal(fs.existsSync(path.join(workspace, '.meminisse', 'memory', '.write.lock')), false);
+  } finally {
+    fs.writeFileSync(releasePath, 'release');
+    for (const worker of workers) worker.child.kill();
+    await Promise.allSettled(workers.map((worker) => worker.done));
+    fs.rmSync(workspace, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('concurrent remembers serialize duplicate detection and preserve distinct records', async () => {
+  const workspace = makeTempDir('concurrent-remember-workspace-');
+  const home = makeTempDir('concurrent-remember-home-');
+  const workers = [];
+
+  try {
+    for (const body of ['Repeated memory.', 'Repeated memory.', 'Repeated memory.', 'Distinct first memory.', 'Distinct second memory.']) {
+      workers.push(startWorker(`
+        const isolatedHome = process.argv[1];
+        require('os').homedir = () => isolatedHome;
+        const body = process.argv[2];
+        process.argv = [process.execPath, ${JSON.stringify(cliPath)}, 'remember', '--kind', 'fact', body];
+        require(${JSON.stringify(cliPath)});
+      `, [home, body], workspace));
+    }
+    await Promise.all(workers.map((worker) => worker.done));
+    const records = JSON.parse(runCli(['list', '--scope', 'project', '--json'], { cwd: workspace, home }).stdout);
+    assert.equal(records.length, 3);
+    assert.equal(records.filter((record) => record.body === 'Repeated memory.').length, 1);
+    const index = JSON.parse(fs.readFileSync(path.join(workspace, '.meminisse', 'memory', 'index.json'), 'utf8'));
+    assert.equal(index.records, 3);
+  } finally {
+    for (const worker of workers) worker.child.kill();
+    await Promise.allSettled(workers.map((worker) => worker.done));
     fs.rmSync(workspace, { recursive: true, force: true });
     fs.rmSync(home, { recursive: true, force: true });
   }

@@ -11,7 +11,9 @@ const path = require('path');
 const { MEMORY_SCHEMA_VERSION, TEXT_ATTACHMENT_EXTENSIONS } = require('../constants');
 const { parseOptions } = require('../core/options');
 const { extractEntities, extractTags } = require('../memory/recall');
-const { detectAttachmentSecret } = require('../security/secrets');
+const { assertNoSecrets, detectAttachmentSecret } = require('../security/secrets');
+const { readEncryptionConfig, requireEncryptionKey } = require('../security/encryption');
+const { atomicWriteFile, withMemoryLock } = require('../system/file-safety');
 const { defaultMemoryTypeForKind } = require('./remember');
 const {
   contentHash,
@@ -28,10 +30,10 @@ const {
   fileForKind,
   projectIdentity,
   projectMemoryPath,
-  relativeToCwd,
+  relativeToProjectRoot,
   titleFromFilename,
 } = require('../system/paths');
-const { refreshIndex, writeRecord } = require('../memory/storage');
+const { readRecords, refreshIndex, writeRecord } = require('../memory/storage');
 const { normalizeAttachmentKind, normalizeKind } = require('../core/validators');
 
 /**
@@ -52,68 +54,99 @@ function attachCommand(args) {
     throw new Error(`Attachment source must be an existing file: ${sourceInput}`);
   }
 
-  const secret = detectAttachmentSecret(sourcePath, TEXT_ATTACHMENT_EXTENSIONS);
-  if (secret && !opts['allow-secret']) {
-    throw new Error(
-      `Possible ${secret} detected in attachment. Refusing to store it. Remove the secret or pass --allow-secret if this is intentionally non-sensitive.`,
-    );
-  }
+  const allowSecret = opts['allow-secret'] === true || opts['allow-secret'] === 'true';
+  assertAttachmentSafe(sourcePath, allowSecret);
 
   const attachmentKind = normalizeAttachmentKind(opts.kind || 'reference');
   const memoryKind = opts['memory-kind'] ? normalizeKind(opts['memory-kind']) : 'fact';
   const tags = splitList(opts.tags);
   const title = normalizeText(opts.title || titleFromFilename(sourcePath));
-  const createdAt = new Date().toISOString();
-  const folder = createAttachmentFolder(title, createdAt);
-  const extension = path.extname(sourcePath);
-  const storedPath = path.join(folder, `original${extension || ''}`);
-  const notePath = path.join(folder, 'note.md');
-  const metadataPath = path.join(folder, 'metadata.json');
+  assertNoSecrets([title, tags], allowSecret);
+  assertNoSecrets(sourceInput, allowSecret, { pathValues: true });
+  const root = projectMemoryPath();
+  return withMemoryLock(root, () => {
+    const encryption = readEncryptionConfig(root);
+    if (encryption) requireEncryptionKey(encryption.key_env);
+    // Authenticate existing encrypted records before changing attachment files.
+    readRecords(root);
+    ensureProjectProfile();
+    ensureProjectIgnoreFiles();
 
-  ensureProjectProfile();
-  ensureProjectIgnoreFiles();
-  fs.copyFileSync(sourcePath, storedPath);
+    const snapshots = [fileForKind(memoryKind), 'index.json'].map((filename) => {
+      const filePath = path.join(root, filename);
+      return {
+        filePath,
+        content: fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : undefined,
+      };
+    });
+    const createdAt = new Date().toISOString();
+    const folder = createAttachmentFolder(title, createdAt);
+    const extension = path.extname(sourcePath);
+    const storedPath = path.join(folder, `original${extension || ''}`);
+    const notePath = path.join(folder, 'note.md');
+    const metadataPath = path.join(folder, 'metadata.json');
+    const metadata = {
+      schema_version: MEMORY_SCHEMA_VERSION,
+      title,
+      kind: attachmentKind,
+      tags,
+      source_path: sourceInput,
+      stored_path: relativeToProjectRoot(storedPath),
+      note_path: relativeToProjectRoot(notePath),
+      metadata_path: relativeToProjectRoot(metadataPath),
+      created_at: createdAt,
+    };
+    let record;
+    let persistenceStarted = false;
+    try {
+      fs.copyFileSync(sourcePath, storedPath, fs.constants.COPYFILE_EXCL);
+      // Scan the exact copied bytes too, in case the source changed during copy.
+      assertAttachmentSafe(storedPath, allowSecret);
+      atomicWriteFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+      atomicWriteFile(notePath, renderAttachmentNote(metadata, storedPath));
+      record = createAttachmentRecord(metadata, memoryKind);
+      persistenceStarted = true;
+      writeRecord(root, fileForKind(memoryKind), record);
+      refreshIndex(root);
+    } catch (error) {
+      if (persistenceStarted) {
+        try {
+          restoreMemoryFiles(snapshots);
+        } catch (rollbackError) {
+          // Keep supporting files if a record may still reference them.
+          throw new Error(
+            `Attachment failed and memory rollback failed: ${rollbackError.message}. Supporting files remain in ${relativeToProjectRoot(folder)}.`,
+            { cause: error },
+          );
+        }
+      }
+      fs.rmSync(folder, { recursive: true, force: true });
+      throw error;
+    }
 
-  const metadata = {
-    schema_version: MEMORY_SCHEMA_VERSION,
-    title,
-    kind: attachmentKind,
-    tags,
-    source_path: sourceInput,
-    stored_path: relativeToCwd(storedPath),
-    note_path: relativeToCwd(notePath),
-    metadata_path: relativeToCwd(metadataPath),
-    created_at: createdAt,
-  };
-  fs.writeFileSync(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`, 'utf8');
-  fs.writeFileSync(notePath, renderAttachmentNote(metadata, sourcePath), 'utf8');
-
-  if (opts.move) {
-    fs.rmSync(sourcePath);
-  }
-
-  const record = rememberAttachment(metadata, memoryKind);
-  console.log(`Attached ${record.id} (${attachmentKind}).`);
-  console.log(`Note: ${metadata.note_path}`);
-  console.log(`Stored copy: ${metadata.stored_path}`);
+    // A failed persistence step must leave the original source in place.
+    if (opts.move) fs.rmSync(sourcePath);
+    console.log(`Attached ${record.id} (${attachmentKind}).`);
+    console.log(`Note: ${metadata.note_path}`);
+    console.log(`Stored copy: ${metadata.stored_path}`);
+  });
 }
 
 /**
- * Writes a memory record for an attachment.
+ * Builds a memory record for an attachment.
  *
  * @param {object} metadata - Attachment metadata.
  * @param {string} memoryKind - Memory kind to store.
- * @returns {object} Written memory record.
+ * @returns {object} Memory record ready to persist.
  */
-function rememberAttachment(metadata, memoryKind) {
-  const root = projectMemoryPath();
+function createAttachmentRecord(metadata, memoryKind) {
   const now = new Date().toISOString();
   const body = [
     `Attached ${metadata.title} as ${metadata.kind}.`,
     `Note: ${metadata.note_path}`,
     `Stored copy: ${metadata.stored_path}`,
   ].join(' ');
-  const record = {
+  return {
     schema_version: MEMORY_SCHEMA_VERSION,
     id: makeId('mem', `project:${memoryKind}:${body}:${now}`),
     kind: memoryKind,
@@ -134,17 +167,46 @@ function rememberAttachment(metadata, memoryKind) {
     created_at: now,
     updated_at: now,
   };
+}
 
-  writeRecord(root, fileForKind(memoryKind), record);
-  refreshIndex(root);
-  return record;
+/**
+ * Restores attachment-related memory files while the memory lock is held.
+ *
+ * @param {{ filePath: string, content?: string }[]} snapshots - Previous files.
+ * @returns {void}
+ */
+function restoreMemoryFiles(snapshots) {
+  for (const { filePath, content } of snapshots) {
+    if (content === undefined) {
+      fs.rmSync(filePath, { force: true });
+    } else if (!fs.existsSync(filePath) || fs.readFileSync(filePath, 'utf8') !== content) {
+      atomicWriteFile(filePath, content);
+    }
+  }
+}
+
+/**
+ * Checks source or copied attachment bytes without exposing possible secrets.
+ *
+ * @param {string} filePath - Attachment path to inspect.
+ * @param {boolean} allowSecret - Whether intentional test data is permitted.
+ * @returns {void}
+ */
+function assertAttachmentSafe(filePath, allowSecret) {
+  if (allowSecret) return;
+  const secret = detectAttachmentSecret(filePath, TEXT_ATTACHMENT_EXTENSIONS);
+  if (secret) {
+    throw new Error(
+      `Possible ${secret} detected in attachment. Refusing to store it. Remove the secret or pass --allow-secret if this is intentionally non-sensitive.`,
+    );
+  }
 }
 
 /**
  * Renders the Markdown note stored beside an attachment.
  *
  * @param {object} metadata - Attachment metadata.
- * @param {string} sourcePath - Original source path.
+ * @param {string} sourcePath - Stored attachment path used for the excerpt.
  * @returns {string} Markdown note.
  */
 function renderAttachmentNote(metadata, sourcePath) {

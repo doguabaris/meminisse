@@ -14,7 +14,31 @@ const {
   ENCRYPTION_CONFIG_FILE,
   MEMORY_SCHEMA_VERSION,
 } = require('../constants');
-const { ensureDir } = require('../system/paths');
+const { ensureDir, uniqueMemoryFiles } = require('../system/paths');
+const { atomicWriteFile } = require('../system/file-safety');
+
+const MAX_SESSION_KEYS = 8;
+let activeSession;
+
+/**
+ * Reuses derived keys only during a synchronous storage operation.
+ *
+ * @template T
+ * @param {() => T} operation - Synchronous operation.
+ * @returns {T} Operation result.
+ */
+function withEncryptionSession(operation) {
+  if (activeSession) return operation();
+  const session = new Map();
+  activeSession = session;
+  try {
+    return operation();
+  } finally {
+    activeSession = undefined;
+    for (const key of session.values()) key.fill(0);
+    session.clear();
+  }
+}
 
 /**
  * Reads enabled encryption config for a memory root.
@@ -41,10 +65,9 @@ function readEncryptionConfig(root) {
  */
 function writeEncryptionConfig(root, config) {
   ensureDir(root);
-  fs.writeFileSync(
+  atomicWriteFile(
     path.join(root, ENCRYPTION_CONFIG_FILE),
     `${JSON.stringify(config, null, 2)}\n`,
-    'utf8',
   );
 }
 
@@ -99,10 +122,10 @@ function encryptRecord(record, config) {
  *
  * @param {string} root - Memory root directory.
  * @param {object} envelope - Encrypted envelope.
+ * @param {object | undefined} [config] - Existing or staged encryption configuration.
  * @returns {object} Plain memory record.
  */
-function decryptRecord(root, envelope) {
-  const config = readEncryptionConfig(root);
+function decryptRecord(root, envelope, config = readEncryptionConfig(root)) {
   if (!config || !config.enabled) {
     throw new Error(`Encrypted memory requires ${ENCRYPTION_CONFIG_FILE} in ${root}`);
   }
@@ -125,15 +148,61 @@ function decryptRecord(root, envelope) {
  *
  * @param {string} root - Memory root directory.
  * @param {object} record - Memory record.
+ * @param {object | undefined} [config] - Existing or staged encryption configuration.
  * @returns {string} JSONL line.
  */
-function serializeStoredRecord(root, record) {
-  const config = readEncryptionConfig(root);
+function serializeStoredRecord(root, record, config = readEncryptionConfig(root)) {
   if (config && config.enabled) {
     return JSON.stringify(encryptRecord(record, config));
   }
 
   return JSON.stringify(record);
+}
+
+/**
+ * Adds an authenticated token for checking the key even in an empty store.
+ *
+ * @param {object} config - Encryption configuration.
+ * @returns {object} Configuration with a key check.
+ */
+function addEncryptionKeyCheck(config) {
+  return {
+    ...config,
+    key_check: encryptRecord({ purpose: 'meminisse-key-check' }, config),
+  };
+}
+
+/**
+ * Validates the configured key before appending encrypted data.
+ * Older stores use their first encrypted record as the authenticated check.
+ *
+ * @param {string} root - Memory root directory.
+ * @param {object | undefined} config - Current encryption configuration.
+ * @returns {void}
+ */
+function verifyEncryptionKey(root, config = readEncryptionConfig(root)) {
+  if (!config) return;
+  requireEncryptionKey(config.key_env);
+  if (config.key_check) {
+    const check = decryptRecord(root, config.key_check, config);
+    if (check.purpose !== 'meminisse-key-check') {
+      throw new Error('Invalid encryption key check.');
+    }
+    return;
+  }
+
+  for (const filename of uniqueMemoryFiles()) {
+    const filePath = path.join(root, filename);
+    if (!fs.existsSync(filePath)) continue;
+    for (const line of fs.readFileSync(filePath, 'utf8').split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line);
+      if (parsed && parsed.encrypted === true) {
+        decryptRecord(root, parsed, config);
+        return;
+      }
+    }
+  }
 }
 
 /**
@@ -147,7 +216,12 @@ function serializeStoredRecord(root, record) {
 function parseStoredRecord(root, line, normalize) {
   const parsed = JSON.parse(line);
   if (parsed && parsed.encrypted === true) {
-    return normalize(decryptRecord(root, parsed));
+    try {
+      return normalize(decryptRecord(root, parsed));
+    } catch (error) {
+      error.encryptedMemory = true;
+      throw error;
+    }
   }
 
   return normalize(parsed);
@@ -180,14 +254,32 @@ function requireEncryptionKey(keyEnv) {
  */
 function deriveEncryptionKey(config) {
   const secret = requireEncryptionKey(config.key_env);
-  return crypto.scryptSync(secret, Buffer.from(config.salt, 'base64'), 32);
+  if (!activeSession) {
+    return crypto.scryptSync(secret, Buffer.from(config.salt, 'base64'), 32);
+  }
+
+  const cacheId = crypto.createHash('sha256')
+    .update(JSON.stringify([config.key_env, config.salt, secret]))
+    .digest('hex');
+  if (activeSession.has(cacheId)) return activeSession.get(cacheId);
+  const key = crypto.scryptSync(secret, Buffer.from(config.salt, 'base64'), 32);
+  if (activeSession.size >= MAX_SESSION_KEYS) {
+    const oldestId = activeSession.keys().next().value;
+    activeSession.get(oldestId).fill(0);
+    activeSession.delete(oldestId);
+  }
+  activeSession.set(cacheId, key);
+  return key;
 }
 
 module.exports = {
+  addEncryptionKeyCheck,
   createEncryptionConfig,
   parseStoredRecord,
   readEncryptionConfig,
   requireEncryptionKey,
   serializeStoredRecord,
+  verifyEncryptionKey,
+  withEncryptionSession,
   writeEncryptionConfig,
 };

@@ -17,29 +17,27 @@ const { countBy } = require('./utils');
  * @returns {string} Human-readable recall output.
  */
 function formatRecall(items, query, options) {
-  const lines = [`Relevant memories for: ${query}`];
-  let used = lines[0].length + 1;
-
+  const queryPreview = query.length > 200 ? `${query.slice(0, 197)}...` : query;
+  const lines = [`Relevant memories for: ${queryPreview}`];
   for (const item of items) {
-    const rendered = renderRecallItem(item, options.mode);
-    for (const line of rendered) {
-      const remaining = options.maxChars - used;
-      if (remaining <= 0) {
-        lines.push('... truncated by --max-chars');
-        return lines.join('\n');
-      }
-
-      if (line.length + 1 > remaining) {
-        lines.push(`${line.slice(0, Math.max(0, remaining - 18))}... truncated`);
-        return lines.join('\n');
-      }
-
-      lines.push(line);
-      used += line.length + 1;
-    }
+    lines.push(...renderRecallItem(item, options.mode));
   }
+  return formatBudgetedText(lines.join('\n'), options.maxChars);
+}
 
-  return lines.join('\n');
+/**
+ * Bounds terminal text including the final newline emitted by console.log.
+ *
+ * @param {string} text - Complete terminal text.
+ * @param {number} maxChars - Character budget including the terminal newline.
+ * @returns {string} Text fitting within the remaining budget.
+ */
+function formatBudgetedText(text, maxChars) {
+  const budget = Math.max(0, Math.floor(maxChars) - 1);
+  if (text.length <= budget) return text;
+  const marker = '... truncated by --max-chars';
+  if (budget <= marker.length) return marker.slice(0, budget);
+  return `${text.slice(0, budget - marker.length)}${marker}`;
 }
 
 /**
@@ -79,27 +77,11 @@ function renderRecallItem(item, mode) {
  */
 function formatInjection(items, options) {
   const lines = ['Meminisse injected memory'];
-  let used = lines[0].length + 1;
-
   for (const item of items) {
     const record = item.record;
-    const line = `- [${item.scope}/${record.kind}] ${record.summary}`;
-    const remaining = options.maxChars - used;
-    if (remaining <= 0) {
-      lines.push('... truncated by --max-chars');
-      break;
-    }
-
-    if (line.length + 1 > remaining) {
-      lines.push(`${line.slice(0, Math.max(0, remaining - 18))}... truncated`);
-      break;
-    }
-
-    lines.push(line);
-    used += line.length + 1;
+    lines.push(`- [${item.scope}/${record.kind}] ${record.summary}`);
   }
-
-  return lines.join('\n');
+  return formatBudgetedText(lines.join('\n'), options.maxChars);
 }
 
 /**
@@ -249,6 +231,7 @@ function formatEncryptionStats(action, stats) {
 }
 
 module.exports = {
+  formatBudgetedText,
   formatDoctor,
   formatEncryptionStats,
   formatInjection,

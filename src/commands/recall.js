@@ -7,7 +7,7 @@
 'use strict';
 
 const { DEFAULT_RECALL_LIMIT, DEFAULT_RECALL_MAX_CHARS } = require('../constants');
-const { formatRecall } = require('../core/formatters');
+const { formatBudgetedText, formatRecall } = require('../core/formatters');
 const { parseOptions } = require('../core/options');
 const { buildRecallCorpus, formatScore, scoreRecord } = require('../memory/recall');
 const { readRecordsWithScope, updateRecallTelemetry } = require('../memory/storage');
@@ -58,7 +58,7 @@ function recallCommand(args) {
   }
 
   if (records.length === 0) {
-    console.log('No relevant memories found.');
+    console.log(formatBudgetedText('No relevant memories found.', maxChars));
     return;
   }
 

@@ -11,6 +11,7 @@ const { forEachConcreteScope } = require('../system/paths');
 const { markDeleted, refreshIndex } = require('../memory/storage');
 const { normalizeText, splitArgsList, splitList, uniqueArray } = require('../core/utils');
 const { normalizeScope } = require('../core/validators');
+const { assertNoSecrets } = require('../security/secrets');
 
 /**
  * Marks active memories as deleted.
@@ -29,6 +30,7 @@ function forgetCommand(args) {
   const uniqueIds = uniqueArray(ids);
   const now = new Date().toISOString();
   const reason = normalizeText(opts.reason);
+  assertNoSecrets(reason, opts['allow-secret'] === true || opts['allow-secret'] === 'true');
   const deleted = [];
 
   forEachConcreteScope(scope, (name, root) => {

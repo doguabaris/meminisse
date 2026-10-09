@@ -99,7 +99,8 @@ function buildRecallCorpus(records) {
  * @returns {number} A positive score for relevant records, or zero for no match.
  */
 function scoreRecord(record, query, corpus) {
-  const queryTokens = uniqueArray(tokenize(query));
+  const querySequence = tokenize(query);
+  const queryTokens = uniqueArray(querySequence);
   if (queryTokens.length === 0) {
     return 0;
   }
@@ -111,7 +112,7 @@ function scoreRecord(record, query, corpus) {
   lexicalScore += bm25FieldScore(queryTokens, fields.tags, corpus, 'tags') * 4;
   lexicalScore += bm25FieldScore(queryTokens, fields.entities, corpus, 'entities') * 2;
   lexicalScore += bm25FieldScore(queryTokens, fields.paths, corpus, 'paths') * 2.5;
-  lexicalScore += phraseScore(queryTokens, fields) * 2;
+  lexicalScore += phraseScore(querySequence, fields) * 2;
 
   if (lexicalScore <= 0) {
     return 0;
@@ -140,9 +141,10 @@ function tokenize(text) {
   return normalizeText(text)
     .toLowerCase()
     .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .split(/[^a-z0-9_./-]+/)
-    .map((token) => token.trim())
+    .replace(/\p{M}/gu, '')
+    .replace(/ı/g, 'i')
+    .split(/[^\p{L}\p{N}_./-]+/u)
+    .map((token) => token.replace(/\.+$/, '').trim())
     .filter((token) => token.length > 2 && !STOPWORDS.has(token));
 }
 
@@ -180,9 +182,13 @@ function extractEntities(text) {
  * @returns {string[]} Derived path cues.
  */
 function extractPaths(text) {
+  const withoutUrls = normalizeText(text).replace(
+    /(?:\b[a-z][a-z0-9+.-]*:)?\/\/[^\s<>"']+/gi,
+    ' ',
+  );
   const matches =
-    normalizeText(text).match(/(?:\.?\.?\/|~\/|\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+/g) || [];
-  return uniqueArray(matches).slice(0, 12);
+    withoutUrls.match(/(?:\.?\.?\/|~\/|\/)?[\p{L}\p{N}_.-]+(?:\/[\p{L}\p{N}_.-]+)+/gu) || [];
+  return uniqueArray(matches.map((match) => match.replace(/\.+$/, ''))).slice(0, 12);
 }
 
 /**
@@ -203,12 +209,28 @@ function formatScore(value) {
  */
 function recallFields(record) {
   return {
-    summary: tokenize(record.summary || ''),
-    body: tokenize(record.body || ''),
-    tags: normalizeStringArray(record.tags).flatMap(tokenize),
-    entities: normalizeStringArray(record.entities).flatMap(tokenize),
-    paths: normalizeStringArray(record.paths).flatMap(tokenize),
+    summary: retrievalTokens(record.summary || ''),
+    body: retrievalTokens(record.body || ''),
+    tags: normalizeStringArray(record.tags).flatMap(retrievalTokens),
+    entities: normalizeStringArray(record.entities).flatMap(retrievalTokens),
+    paths: normalizeStringArray(record.paths).flatMap(retrievalTokens),
   };
+}
+
+/**
+ * Keeps complete path tokens while also indexing directory and filename cues.
+ *
+ * @param {string} text - Field text.
+ * @returns {string[]} Retrieval tokens including path components.
+ */
+function retrievalTokens(text) {
+  const tokens = tokenize(text);
+  const components = tokens
+    .filter((token) => token.includes('/'))
+    .flatMap((token) => token.split('/'))
+    .flatMap((component) => [component, component.replace(/\.[^.]+$/, '')])
+    .filter((token) => token.length > 2 && !STOPWORDS.has(token));
+  return tokens.concat(uniqueArray(components));
 }
 
 /**
@@ -249,7 +271,7 @@ function bm25FieldScore(queryTokens, fieldTokens, corpus, field) {
 /**
  * Scores exact adjacent query-token matches inside record fields.
  *
- * @param {string[]} queryTokens - Unique normalized query tokens.
+ * @param {string[]} queryTokens - Ordered normalized query tokens.
  * @param {{ summary: string[], body: string[], tags: string[], entities: string[], paths: string[] }} fields - Record fields.
  * @returns {number} Phrase boost.
  */
@@ -258,9 +280,12 @@ function phraseScore(queryTokens, fields) {
     return 0;
   }
 
-  const phrase = queryTokens.join(' ');
-  const haystacks = Object.values(fields).map((tokens) => tokens.join(' '));
-  return haystacks.some((text) => text.includes(phrase)) ? queryTokens.length : 0;
+  const matches = Object.values(fields).some((tokens) =>
+    tokens.some((_, index) =>
+      queryTokens.every((token, offset) => tokens[index + offset] === token),
+    ),
+  );
+  return matches ? queryTokens.length : 0;
 }
 
 /**
