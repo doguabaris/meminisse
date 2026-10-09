@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.3 / 2026-10-09
+
+* Hardened storage locks, atomic writes, and multi-file transaction recovery.
+* Made attachment moves safe under concurrent use and failed persistence.
+* Improved encryption key validation, migration safety, and read-only behavior.
+* Expanded secret detection and tightened recall, review, doctor, and injection handling.
+* Added regression coverage for storage, attachments, encryption, retrieval, and read-only stores.
+
 ## 0.5.2 / 2026-04-13
 
 * Add GitHub Actions workflow for Node.js package
